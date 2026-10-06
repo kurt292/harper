@@ -1,21 +1,30 @@
 use std::iter::once;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::rect::Rect;
 use crate::windows_broker::get_focused_monitor_scale;
 use harper_core::{Span, linting::Suggestion};
 use is_macro::Is;
-use uiautomation::types::{Handle, TextPatternRangeEndpoint, TextUnit, TreeScope, UIProperty};
+use uiautomation::types::{
+    ControlType, Handle, TextPatternRangeEndpoint, TextUnit, TreeScope, UIProperty,
+};
 use uiautomation::variants::Variant;
 use uiautomation::{
     UIAutomation, UIElement,
-    patterns::{UITextPattern, UIValuePattern},
+    patterns::{UITextPattern, UITextRange, UIValuePattern},
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::IUIAutomationTextRange;
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_DELETE, VK_MENU,
+    VK_SHIFT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+};
 
 /// Information about a worker thread.
 struct WorkerData {
@@ -202,6 +211,28 @@ impl Drop for AutomationService {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Applying suggestions
+// ---------------------------------------------------------------------------
+
+/// How long to wait for the target field to regain keyboard focus after the user clicks a
+/// suggestion in Harper's overlay.
+const FOCUS_RETURN_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// How long to wait for the user to release modifier keys before typing a replacement.
+const MODIFIER_RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How long to give the target application to process simulated input before re-reading.
+const POST_INPUT_SETTLE: Duration = Duration::from_millis(120);
+
+/// Why the selection-based write-back could not be used.
+enum SelectionApplyError {
+    /// The provider lacks what the method needs. Falling back to `ValuePattern.SetValue` is fine.
+    Unavailable(String),
+    /// A verification step failed before any input was sent. The field is untouched.
+    Aborted(String),
+}
+
 fn apply_suggestion_job(automation: &UIAutomation, mut arguments: Vec<JobArgument>) -> JobResult {
     let Some(JobArgument::ApplySuggestion(request)) = arguments.pop() else {
         return JobResult::Err;
@@ -238,6 +269,43 @@ fn apply_suggestion_job(automation: &UIAutomation, mut arguments: Vec<JobArgumen
         }
     };
 
+    // Preferred path: select exactly the affected range through UIA and type the replacement.
+    // This keeps the caret where a human edit would leave it and works in providers that expose
+    // `TextPattern` but no writable `ValuePattern` (Chromium contenteditable surfaces, for one).
+    match apply_via_selection(
+        automation,
+        &element,
+        request.window,
+        &current_text,
+        request.span,
+        &request.suggestion,
+    ) {
+        Ok(()) => {
+            sleep(POST_INPUT_SETTLE);
+            match get_text(&element) {
+                Ok(after) if after == updated_text => {}
+                Ok(after) => eprintln!(
+                    "Windows suggestion applied but the field reads differently than expected \
+                     ({} chars vs {} expected); leaving it for the user",
+                    after.chars().count(),
+                    updated_text.chars().count()
+                ),
+                Err(error) => {
+                    eprintln!("Windows suggestion applied but the field could not be re-read: {error}")
+                }
+            }
+            return JobResult::None;
+        }
+        Err(SelectionApplyError::Unavailable(reason)) => {
+            eprintln!("Selection write-back unavailable ({reason}); falling back to SetValue");
+        }
+        Err(SelectionApplyError::Aborted(reason)) => {
+            eprintln!("Selection write-back aborted before typing ({reason}); falling back to SetValue");
+        }
+    }
+
+    // Fallback: replace the whole value. Verified safe content-wise above, but most providers move
+    // the caret to the start or end of the field afterwards.
     let Ok(value_pattern) = element.get_pattern::<UIValuePattern>() else {
         eprintln!(
             "Unable to apply Windows suggestion: the text element has no writable value pattern"
@@ -250,8 +318,17 @@ fn apply_suggestion_job(automation: &UIAutomation, mut arguments: Vec<JobArgumen
             eprintln!("Unable to apply Windows suggestion: the text element is read-only");
         }
         Ok(false) => {
-            if let Err(error) = value_pattern.set_value(&updated_text) {
-                eprintln!("Unable to apply Windows suggestion: {error}");
+            // Re-check right before writing: the selection attempt may have taken a moment.
+            match get_text(&element) {
+                Ok(text) if text == request.expected_text => {
+                    if let Err(error) = value_pattern.set_value(&updated_text) {
+                        eprintln!("Unable to apply Windows suggestion: {error}");
+                    }
+                }
+                Ok(_) => eprintln!(
+                    "Unable to apply Windows suggestion: the source text changed before writing"
+                ),
+                Err(error) => eprintln!("Unable to apply Windows suggestion: {error}"),
             }
         }
         Err(error) => {
@@ -281,13 +358,237 @@ fn apply_suggestion_to_text(
     Ok(chars.into_iter().collect())
 }
 
+/// Selects the span the suggestion targets and types the replacement.
+///
+/// Every step that can observe the provider's state verifies it before anything is sent, so the
+/// worst case is "nothing happened", never "the wrong text changed".
+fn apply_via_selection(
+    automation: &UIAutomation,
+    element: &UIElement,
+    window: isize,
+    current_text: &str,
+    span: Span<char>,
+    suggestion: &Suggestion,
+) -> std::result::Result<(), SelectionApplyError> {
+    use SelectionApplyError::{Aborted, Unavailable};
+
+    let pattern: UITextPattern = element
+        .get_pattern()
+        .map_err(|_| Unavailable("no TextPattern".to_string()))?;
+
+    let (start, len, typed): (usize, usize, String) = match suggestion {
+        Suggestion::ReplaceWith(chars) => (span.start, span.len(), chars.iter().collect()),
+        Suggestion::InsertAfter(chars) => (span.end, 0, chars.iter().collect()),
+        Suggestion::Remove => (span.start, span.len(), String::new()),
+    };
+
+    let range = range_for_span(&pattern, start as i32, len as i32)
+        .map_err(|error| Unavailable(format!("could not build a range: {error}")))?;
+
+    let expected_slice: String = current_text.chars().skip(start).take(len).collect();
+    let actual_slice = range
+        .get_text(-1)
+        .map_err(|error| Unavailable(format!("range text unreadable: {error}")))?;
+    if actual_slice != expected_slice {
+        return Err(Aborted(format!(
+            "range reads {actual_slice:?}, expected {expected_slice:?}"
+        )));
+    }
+
+    // The user just clicked Harper's overlay, so the target may have lost keyboard focus.
+    return_focus_to(automation, element, window)?;
+
+    range
+        .select()
+        .map_err(|error| Unavailable(format!("Select failed: {error}")))?;
+
+    let selected = pattern
+        .get_selection()
+        .ok()
+        .and_then(|ranges| ranges.into_iter().next())
+        .and_then(|range| range.get_text(-1).ok())
+        .unwrap_or_default();
+    if selected != expected_slice {
+        return Err(Aborted(format!(
+            "selection reads {selected:?} after Select(), expected {expected_slice:?}"
+        )));
+    }
+
+    if !wait_for_modifiers_released(MODIFIER_RELEASE_TIMEOUT) {
+        return Err(Aborted("modifier keys still held".to_string()));
+    }
+
+    if typed.is_empty() {
+        send_virtual_key(VK_DELETE);
+    } else {
+        send_unicode_text(&typed);
+    }
+
+    Ok(())
+}
+
+/// Brings `window` forward and waits until `element` reports keyboard focus again.
+fn return_focus_to(
+    automation: &UIAutomation,
+    element: &UIElement,
+    window: isize,
+) -> std::result::Result<(), SelectionApplyError> {
+    let target_id = element
+        .get_runtime_id()
+        .map_err(|error| SelectionApplyError::Unavailable(format!("no runtime id: {error}")))?;
+
+    let already_focused = || {
+        automation
+            .get_focused_element()
+            .and_then(|focused| focused.get_runtime_id())
+            .map(|id| id == target_id)
+            .unwrap_or(false)
+    };
+
+    if already_focused() {
+        return Ok(());
+    }
+
+    unsafe {
+        let _ = SetForegroundWindow(HWND(window as *mut std::ffi::c_void));
+    }
+    let _ = element.set_focus();
+
+    let deadline = Instant::now() + FOCUS_RETURN_TIMEOUT;
+    while Instant::now() < deadline {
+        if already_focused() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(15));
+    }
+
+    Err(SelectionApplyError::Aborted(
+        "the target field did not regain keyboard focus".to_string(),
+    ))
+}
+
+/// A range covering `len` characters starting at character offset `start` of the document.
+fn range_for_span(pattern: &UITextPattern, start: i32, len: i32) -> uiautomation::Result<UITextRange> {
+    let range = pattern.get_document_range()?;
+
+    range.move_endpoint_by_range(
+        TextPatternRangeEndpoint::End,
+        &range,
+        TextPatternRangeEndpoint::Start,
+    )?;
+    range.move_endpoint_by_unit(TextPatternRangeEndpoint::Start, TextUnit::Character, start)?;
+    range.move_endpoint_by_range(
+        TextPatternRangeEndpoint::End,
+        &range,
+        TextPatternRangeEndpoint::Start,
+    )?;
+    range.move_endpoint_by_unit(TextPatternRangeEndpoint::End, TextUnit::Character, len)?;
+
+    Ok(range)
+}
+
+fn wait_for_modifiers_released(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let held = unsafe {
+            GetAsyncKeyState(VK_CONTROL.0 as i32) < 0
+                || GetAsyncKeyState(VK_MENU.0 as i32) < 0
+                || GetAsyncKeyState(VK_SHIFT.0 as i32) < 0
+        };
+        if !held {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(Duration::from_millis(15));
+    }
+}
+
+/// Types `text` into the focused control as Unicode key events, independent of keyboard layout.
+fn send_unicode_text(text: &str) {
+    let mut inputs = Vec::with_capacity(text.len() * 2);
+    for unit in text.encode_utf16() {
+        for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
+            inputs.push(keyboard_input(VIRTUAL_KEY(0), unit, flags));
+        }
+    }
+    unsafe {
+        SendInput(&inputs, size_of::<INPUT>() as i32);
+    }
+}
+
+fn send_virtual_key(key: VIRTUAL_KEY) {
+    let inputs = [
+        keyboard_input(key, 0, KEYBD_EVENT_FLAGS(0)),
+        keyboard_input(key, 0, KEYEVENTF_KEYUP),
+    ];
+    unsafe {
+        SendInput(&inputs, size_of::<INPUT>() as i32);
+    }
+}
+
+fn keyboard_input(key: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Finding and reading the focused text field
+// ---------------------------------------------------------------------------
+
 fn get_text(element: &UIElement) -> uiautomation::Result<String> {
     let pattern: UITextPattern = element.get_pattern()?;
     let range = pattern.get_document_range()?;
     range.get_text(-1)
 }
 
+/// Whether Harper should read from and write to this element at all.
+///
+/// Password fields are never touched. Beyond that, the element must expose `TextPattern` and be
+/// editable: a writable `ValuePattern` is the strongest signal. Chromium reports the whole page as
+/// a `Document` with a read-only `ValuePattern` whenever focus is not inside a field, and this
+/// check is what keeps Harper from linting an entire web page.
+fn is_lintable_text_element(element: &UIElement) -> bool {
+    if element.is_password().unwrap_or(true) {
+        return false;
+    }
+
+    if element.get_pattern::<UITextPattern>().is_err() {
+        return false;
+    }
+
+    match element.get_pattern::<UIValuePattern>() {
+        Ok(value) => matches!(value.is_readonly(), Ok(false)),
+        Err(_) => matches!(
+            element.get_control_type(),
+            Ok(ControlType::Edit | ControlType::Document)
+        ),
+    }
+}
+
+fn element_text_matches(element: &UIElement, expected_text: Option<&str>) -> bool {
+    match expected_text {
+        None => true,
+        Some(expected) => matches!(get_text(element), Ok(text) if text == expected),
+    }
+}
+
 /// Finds the focused text element below `window`.
+///
+/// The focused element is tried first because UIA can answer that in one call, where a subtree
+/// search over a browser's accessibility tree is slow. The search remains as a fallback for
+/// providers whose focused element is a container around the real text control.
 ///
 /// When `expected_text` is provided, unrelated text providers are excluded.
 fn text_element_for_window(
@@ -295,6 +596,15 @@ fn text_element_for_window(
     window: isize,
     expected_text: Option<&str>,
 ) -> uiautomation::Result<UIElement> {
+    if let Ok(focused) = automation.get_focused_element() {
+        if element_belongs_to_window(&focused, window)
+            && is_lintable_text_element(&focused)
+            && element_text_matches(&focused, expected_text)
+        {
+            return Ok(focused);
+        }
+    }
+
     let root = automation.element_from_handle(Handle::from(window))?;
     let text_condition = automation.create_property_condition(
         UIProperty::IsTextPatternAvailable,
@@ -309,16 +619,11 @@ fn text_element_for_window(
     let condition = automation.create_and_condition(text_condition, keyboard_condition)?;
 
     for element in root.find_all(TreeScope::Subtree, &condition)? {
-        if let Some(expected) = expected_text {
-            let text = get_text(&element);
-
-            let Ok(text) = text else {
-                continue;
-            };
-
-            if expected != text {
-                continue;
-            }
+        if !is_lintable_text_element(&element) {
+            continue;
+        }
+        if !element_text_matches(&element, expected_text) {
+            continue;
         }
 
         return Ok(element);
@@ -328,6 +633,19 @@ fn text_element_for_window(
         uiautomation::errors::ERR_NOTFOUND,
         "no text element found",
     ))
+}
+
+/// The focused element often has no window handle of its own (every Chromium control reports
+/// `0`), so ownership is checked by process instead.
+fn element_belongs_to_window(element: &UIElement, window: isize) -> bool {
+    let mut window_process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(
+            HWND(window as *mut std::ffi::c_void),
+            Some(&mut window_process_id),
+        );
+    }
+    window_process_id != 0 && element.get_process_id().ok() == Some(window_process_id)
 }
 
 fn get_text_job(automation: &UIAutomation, args: Vec<JobArgument>) -> JobResult {
@@ -340,6 +658,10 @@ fn get_text_job(automation: &UIAutomation, args: Vec<JobArgument>) -> JobResult 
 
     get_text(&element).map_or(JobResult::Err, JobResult::String)
 }
+
+// ---------------------------------------------------------------------------
+// Bounding rectangles
+// ---------------------------------------------------------------------------
 
 use std::{ffi::c_void, mem::size_of};
 
@@ -377,23 +699,7 @@ fn bounding_rectangles_for_span(
     }
 
     let pattern: UITextPattern = element.get_pattern()?;
-    let range = pattern.get_document_range()?;
-
-    range.move_endpoint_by_range(
-        TextPatternRangeEndpoint::End,
-        &range,
-        TextPatternRangeEndpoint::Start,
-    )?;
-
-    range.move_endpoint_by_unit(TextPatternRangeEndpoint::Start, TextUnit::Character, start)?;
-
-    range.move_endpoint_by_range(
-        TextPatternRangeEndpoint::End,
-        &range,
-        TextPatternRangeEndpoint::Start,
-    )?;
-
-    range.move_endpoint_by_unit(TextPatternRangeEndpoint::End, TextUnit::Character, len)?;
+    let range = range_for_span(&pattern, start, len)?;
 
     let raw: &IUIAutomationTextRange = range.as_ref();
     let array = OwnedSafeArray(unsafe { raw.GetBoundingRectangles()? });

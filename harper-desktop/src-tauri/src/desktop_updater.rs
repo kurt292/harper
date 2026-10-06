@@ -12,6 +12,9 @@ use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::Mutex;
 
 const LATEST_VERSION_URL: &str = "https://writewithharper.com/latestversion";
+
+/// Broadside builds must never replace themselves with upstream Harper binaries.
+const BROADSIDE_UPDATES_DISABLED: bool = true;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -152,6 +155,13 @@ impl DesktopUpdater {
 /// check eligibility, not the network. Skip missed ticks after sleep rather than catching up.
 /// This task lives with the main process, including when all windows are closed.
 pub fn start_auto_updates(app: AppHandle) {
+    // Broadside: this fork tracks upstream through git. Pulling signed official Harper
+    // releases over a modified build would silently undo every local change.
+    if BROADSIDE_UPDATES_DISABLED {
+        tracing::info!("Automatic updates are disabled in the Broadside fork.");
+        return;
+    }
+
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -175,6 +185,17 @@ async fn check_and_install<R: Runtime>(
     installed_update: Option<UpdateResult>,
 ) -> Result<UpdateResult, String> {
     let current_version = DesktopUpdater::current_version(app);
+
+    if BROADSIDE_UPDATES_DISABLED {
+        return Ok(UpdateResult {
+            status: UpdateStatus::UpToDate,
+            current_version: Some(current_version),
+            latest_version: None,
+            message: "This is the Broadside fork of Harper; updates come from git, not the updater."
+                .into(),
+            error: None,
+        });
+    }
     let update = app
         .updater_builder()
         .timeout(REQUEST_TIMEOUT)

@@ -7,6 +7,25 @@ pub struct Integration {
 }
 
 impl Integration {
+    /// Whether this entry applies to `bundle_id`.
+    ///
+    /// An exact match always applies. On Windows, an entry that is a bare executable name (no path
+    /// separator) also matches any full path whose file name equals it, case-insensitively.
+    pub fn matches(&self, bundle_id: &str) -> bool {
+        if self.bundle_id == bundle_id {
+            return true;
+        }
+
+        if !cfg!(target_os = "windows") || self.bundle_id.contains(['\\', '/']) {
+            return false;
+        }
+
+        bundle_id
+            .rsplit(['\\', '/'])
+            .next()
+            .is_some_and(|file_name| file_name.eq_ignore_ascii_case(&self.bundle_id))
+    }
+
     pub fn curated_integrations() -> Vec<Self> {
         #[cfg(target_os = "macos")]
         let integrations = [
@@ -19,8 +38,20 @@ impl Integration {
             "com.bloombuilt.dayone-mac",
         ];
 
+        // Broadside: Windows identifies apps by executable path, which is machine-specific for
+        // Store apps (Notepad) and per-user installs (Notion). Bare file names match any path with
+        // that name; see `Integration::matches`.
         #[cfg(target_os = "windows")]
-        let integrations: [&str; 0] = [];
+        let integrations = [
+            "notepad.exe",
+            "chrome.exe",
+            "msedge.exe",
+            "outlook.exe",
+            "olk.exe",
+            "notion.exe",
+            "winword.exe",
+            "slack.exe",
+        ];
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let integrations: [&str; 0] = [];

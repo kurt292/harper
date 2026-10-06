@@ -467,7 +467,7 @@ fn integration_callback(
         if let Some(integration) = state
             .integrations
             .iter()
-            .find(|item| item.bundle_id == bundle_id)
+            .find(|item| item.matches(bundle_id))
         {
             return integration.enabled;
         }
