@@ -445,8 +445,14 @@ fn apply_suggestion_job(automation: &UIAutomation, mut arguments: Vec<JobArgumen
         return JobResult::Err;
     }
 
-    let Ok(element) =
-        text_element_for_window(automation, request.window, Some(&request.expected_text))
+    // Clicking the suggestion card moves keyboard focus to Harper's overlay, so a lookup that
+    // requires a focused field finds nothing. Prefer the element the last read used, verified
+    // against the text that was linted, and only then search the window without a focus filter.
+    let Some(element) = cached_text_element(request.window, &request.expected_text)
+        .or_else(|| {
+            text_element_for_window(automation, request.window, Some(&request.expected_text)).ok()
+        })
+        .or_else(|| search_text_element(automation, request.window, &request.expected_text).ok())
     else {
         eprintln!(
             "Unable to apply Windows suggestion: the source text element is no longer available"
@@ -863,6 +869,50 @@ fn element_belongs_to_window(element: &UIElement, window: isize) -> bool {
     window_process_id != 0 && element.get_process_id().ok() == Some(window_process_id)
 }
 
+thread_local! {
+    /// The text element the last successful read used, with its window. Lives on the worker
+    /// thread because UIA element wrappers belong to the apartment that created them.
+    static LAST_TEXT_ELEMENT: std::cell::RefCell<Option<(isize, UIElement)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The remembered element for `window`, if it still reads exactly `expected_text`.
+fn cached_text_element(window: isize, expected_text: &str) -> Option<UIElement> {
+    LAST_TEXT_ELEMENT.with(|cell| {
+        let cached = cell.borrow();
+        let (cached_window, element) = cached.as_ref()?;
+        if *cached_window != window {
+            return None;
+        }
+        element_text_matches(element, Some(expected_text)).then(|| element.clone())
+    })
+}
+
+/// Finds a lintable text element in `window` that reads exactly `expected_text`, with no
+/// requirement that it has keyboard focus. Slow in large trees; used only when applying.
+fn search_text_element(
+    automation: &UIAutomation,
+    window: isize,
+    expected_text: &str,
+) -> uiautomation::Result<UIElement> {
+    let root = automation.element_from_handle(Handle::from(window))?;
+    let condition = automation.create_property_condition(
+        UIProperty::IsTextPatternAvailable,
+        Variant::from(true),
+        None,
+    )?;
+    for element in root.find_all(TreeScope::Subtree, &condition)? {
+        if is_lintable_text_element(&element) && element_text_matches(&element, Some(expected_text))
+        {
+            return Ok(element);
+        }
+    }
+    Err(Error::new(
+        uiautomation::errors::ERR_NOTFOUND,
+        "no text element with the linted text found",
+    ))
+}
+
 fn get_text_job(automation: &UIAutomation, args: Vec<JobArgument>) -> JobResult {
     let Some(JobArgument::Window(window)) = args.first() else {
         return JobResult::Err;
@@ -871,7 +921,11 @@ fn get_text_job(automation: &UIAutomation, args: Vec<JobArgument>) -> JobResult 
         return JobResult::Err;
     };
 
-    get_text(&element).map_or(JobResult::Err, JobResult::String)
+    let result = get_text(&element).map_or(JobResult::Err, JobResult::String);
+    if matches!(result, JobResult::String(_)) {
+        LAST_TEXT_ELEMENT.with(|cell| *cell.borrow_mut() = Some((*window, element)));
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
