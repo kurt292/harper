@@ -19,6 +19,10 @@ use crate::rect::ActionableLint;
 
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// An overlay that has not presented within this long gets painted alongside whichever overlay
+/// Windows chose to send WM_PAINT to.
+const STALE_FRAME_AGE: Duration = Duration::from_millis(16);
+
 /// Owns the winit event loop and the overlay windows created for each monitor.
 ///
 /// `WindowManager` is intentionally separate from `Highlighter` because winit event-loop ownership
@@ -271,6 +275,19 @@ impl ApplicationHandler for WindowManagerApp {
 
             if should_render {
                 window.render(&mut self.render_state);
+            }
+        }
+
+        // Windows hands WM_PAINT to whichever window it likes when several have one pending.
+        // With the loop polling and every overlay requesting a redraw each iteration, the
+        // primary-monitor overlay on this machine never received a RedrawRequested at all and
+        // stayed an unpainted white rectangle. So one window's redraw paints every overlay that
+        // has gone a frame without one.
+        if should_render {
+            for window in &mut self.windows {
+                if window.id() != window_id {
+                    window.render_if_stale(&mut self.render_state, STALE_FRAME_AGE);
+                }
             }
         }
 

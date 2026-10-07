@@ -127,8 +127,19 @@ impl AutomationService {
     /// Attempts to run a worker job on the worker thread. Returns `None` if the worker thread does not exist.
     fn run_worker_job(&self, job: WorkerJob, arguments: Vec<JobArgument>) -> Option<JobResult> {
         let worker_data = self.worker_data.as_ref()?;
+        let started = Instant::now();
         worker_data.sender.send((job, arguments)).unwrap();
-        Some(worker_data.receiver.recv().unwrap())
+        let result = worker_data.receiver.recv().unwrap();
+
+        // The caller is the highlighter's event loop; anything slow here is a frozen overlay.
+        let elapsed = started.elapsed();
+        if elapsed > SLOW_JOB_WARNING {
+            eprintln!(
+                "Windows UI Automation job took {} ms (overlay cannot repaint meanwhile)",
+                elapsed.as_millis()
+            );
+        }
+        Some(result)
     }
 
     /// Grab text from the worker.
@@ -214,6 +225,9 @@ impl Drop for AutomationService {
 // ---------------------------------------------------------------------------
 // Applying suggestions
 // ---------------------------------------------------------------------------
+
+/// UIA jobs slower than this get logged; they stall the overlay's event loop.
+const SLOW_JOB_WARNING: Duration = Duration::from_millis(250);
 
 /// How long to wait for the target field to regain keyboard focus after the user clicks a
 /// suggestion in Harper's overlay.
@@ -596,6 +610,11 @@ fn text_element_for_window(
     window: isize,
     expected_text: Option<&str>,
 ) -> uiautomation::Result<UIElement> {
+    // Keyboard focus is on exactly one element, and UIA can name it in one call. When it does,
+    // that answer is final: a focused button or link means there is no field to lint, and
+    // searching the window's whole subtree for one would only burn time. In a browser that
+    // search takes seconds per call and, run from the highlighter's event loop, left the
+    // overlay stuck before its first frame (an opaque white window over the screen).
     if let Ok(focused) = automation.get_focused_element() {
         if element_belongs_to_window(&focused, window)
             && is_lintable_text_element(&focused)
@@ -603,8 +622,13 @@ fn text_element_for_window(
         {
             return Ok(focused);
         }
+        return Err(Error::new(
+            uiautomation::errors::ERR_NOTFOUND,
+            "the focused element is not a lintable text field",
+        ));
     }
 
+    // Fallback only when UIA cannot report the focused element at all.
     let root = automation.element_from_handle(Handle::from(window))?;
     let text_condition = automation.create_property_condition(
         UIProperty::IsTextPatternAvailable,
@@ -618,14 +642,8 @@ fn text_element_for_window(
     )?;
     let condition = automation.create_and_condition(text_condition, keyboard_condition)?;
 
-    for element in root.find_all(TreeScope::Subtree, &condition)? {
-        if !is_lintable_text_element(&element) {
-            continue;
-        }
-        if !element_text_matches(&element, expected_text) {
-            continue;
-        }
-
+    let element = root.find_first(TreeScope::Subtree, &condition)?;
+    if is_lintable_text_element(&element) && element_text_matches(&element, expected_text) {
         return Ok(element);
     }
 

@@ -23,6 +23,15 @@ pub struct Window {
     egui_state: egui_winit::State,
     painter: Painter,
     viewport_id: egui::ViewportId,
+    frames_presented: u64,
+    /// When this window last presented a frame. See `WindowManager` for why other windows'
+    /// redraws may trigger this one.
+    last_render: Option<std::time::Instant>,
+    /// Monitor name, for diagnostics.
+    label: String,
+    /// The monitor's physical size. Re-asserted whenever Windows rescales the window after a
+    /// DPI change, which otherwise leaves a secondary-monitor overlay at the wrong size.
+    monitor_size: PhysicalSize<u32>,
 }
 
 impl Window {
@@ -48,6 +57,16 @@ impl Window {
             )?,
         );
 
+        eprintln!(
+            "overlay window created for monitor {:?}: requested {}x{} at {},{}, actual inner {:?}, scale {}",
+            monitor.name(),
+            size.width,
+            size.height,
+            position.x,
+            position.y,
+            window.inner_size(),
+            window.scale_factor()
+        );
         window.set_outer_position(PhysicalPosition::new(position.x, position.y));
         let _ = window.request_inner_size(PhysicalSize::new(size.width, size.height));
         window.set_cursor_hittest(false)?;
@@ -83,6 +102,10 @@ impl Window {
             egui_state,
             painter,
             viewport_id,
+            frames_presented: 0,
+            last_render: None,
+            label: monitor.name().unwrap_or_else(|| "unnamed monitor".to_string()),
+            monitor_size: PhysicalSize::new(size.width, size.height),
         })
     }
 
@@ -112,13 +135,39 @@ impl Window {
             self.inner.request_redraw();
         }
 
+        if let WindowEvent::ScaleFactorChanged {
+            scale_factor,
+            inner_size_writer,
+        } = event
+        {
+            // Keep the overlay at the monitor's physical size instead of letting Windows scale
+            // it by the new DPI ratio.
+            let mut writer = inner_size_writer.clone();
+            let result = writer.request_inner_size(self.monitor_size);
+            eprintln!(
+                "overlay {}: scale factor changed to {scale_factor}, re-requesting {}x{} ({result:?})",
+                self.label, self.monitor_size.width, self.monitor_size.height
+            );
+        }
+
         if let WindowEvent::Resized(size) = event
             && let (Some(width), Some(height)) =
                 (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         {
+            eprintln!("overlay {}: resized to {}x{}", self.label, size.width, size.height);
             self.painter
                 .on_window_resized(self.viewport_id, width, height);
             self.inner.request_redraw();
+        }
+    }
+
+    /// Renders unless a frame was presented within `max_age`.
+    pub fn render_if_stale(&mut self, render_state: &mut RenderState, max_age: std::time::Duration) {
+        let fresh = self
+            .last_render
+            .is_some_and(|last| last.elapsed() < max_age);
+        if !fresh {
+            self.render(render_state);
         }
     }
 
@@ -141,5 +190,17 @@ impl Window {
             &output.textures_delta,
             Vec::new(),
         );
+
+        self.frames_presented += 1;
+        self.last_render = Some(std::time::Instant::now());
+        if self.frames_presented == 1 {
+            eprintln!(
+                "overlay {}: frame {} presented, inner {:?}, pixels_per_point {}",
+                self.label,
+                self.frames_presented,
+                self.inner.inner_size(),
+                output.pixels_per_point
+            );
+        }
     }
 }
