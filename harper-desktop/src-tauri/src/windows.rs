@@ -75,13 +75,25 @@ fn show_window(window: WebviewWindow) -> tauri::Result<()> {
     window.set_focus()
 }
 
+/// Entry page for the app windows.
+///
+/// A packaged build serves `index.html` from `frontendDist`. The SvelteKit dev server only
+/// answers at `/`, and `/index.html` is a 404 there, which shows up as a white window.
+fn app_entry_url() -> WebviewUrl {
+    if cfg!(dev) {
+        WebviewUrl::App("/".into())
+    } else {
+        WebviewUrl::App("index.html".into())
+    }
+}
+
 /// Open the editor window, focusing it if it already exists.
 pub fn show_editor_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("editor") {
         return show_window(window);
     }
 
-    let window = WebviewWindowBuilder::new(app, "editor", WebviewUrl::App("index.html".into()))
+    let window = WebviewWindowBuilder::new(app, "editor", app_entry_url())
         .title("Harper")
         .inner_size(800.0, 600.0)
         .visible(false)
@@ -96,7 +108,7 @@ pub fn show_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         return show_window(window);
     }
 
-    let window = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+    let window = WebviewWindowBuilder::new(app, "settings", app_entry_url())
         .title("Harper Settings")
         .inner_size(920.0, 680.0)
         .min_inner_size(780.0, 520.0)
