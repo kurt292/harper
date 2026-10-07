@@ -159,7 +159,14 @@ impl RenderState {
     /// being painted, in the same coordinate space, so a window that does not start at 0,0 (a
     /// second monitor) draws its highlights where they belong. Hit-testing stays in screen space.
     pub fn render(&mut self, ui: &mut egui::Ui, origin: (f64, f64)) {
-        let local = |rect: &Rect| Rect::new(rect.x - origin.0, rect.y - origin.1, rect.width, rect.height);
+        let local = |rect: &Rect| {
+            Rect::new(
+                rect.x - origin.0,
+                rect.y - origin.1,
+                rect.width,
+                rect.height,
+            )
+        };
 
         for positioned_lint in self.lints() {
             draw_highlight(ui, &local(&positioned_lint.rect), &positioned_lint.lint);

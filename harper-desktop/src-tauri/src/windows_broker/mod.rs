@@ -111,7 +111,10 @@ impl OsBroker for WindowsBroker {
             return None;
         };
         if text.len() > 16_000 {
-            self.diagnose(format!("field has {} bytes, over the 16k limit; skipping", text.len()));
+            self.diagnose(format!(
+                "field has {} bytes, over the 16k limit; skipping",
+                text.len()
+            ));
             return Some(Vec::new());
         }
 
@@ -133,7 +136,16 @@ impl OsBroker for WindowsBroker {
             .iter()
             .flatten()
             .next()
-            .map(|r| format!(" first rect x={:.0} y={:.0} w={:.0} h={:.0} (scale {:.2})", r.x, r.y, r.width, r.height, get_focused_monitor_scale()))
+            .map(|r| {
+                format!(
+                    " first rect x={:.0} y={:.0} w={:.0} h={:.0} (scale {:.2})",
+                    r.x,
+                    r.y,
+                    r.width,
+                    r.height,
+                    get_focused_monitor_scale()
+                )
+            })
             .unwrap_or_default();
         self.diagnose(format!(
             "{} chars, {lint_count} lints, {} rects{first_rect}",

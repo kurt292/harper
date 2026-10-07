@@ -191,8 +191,9 @@ async fn check_and_install<R: Runtime>(
             status: UpdateStatus::UpToDate,
             current_version: Some(current_version),
             latest_version: None,
-            message: "This is the Broadside fork of Harper; updates come from git, not the updater."
-                .into(),
+            message:
+                "This is the Broadside fork of Harper; updates come from git, not the updater."
+                    .into(),
             error: None,
         });
     }

@@ -511,7 +511,9 @@ async fn save_style_guide(json: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn delete_style_guide(id: String) -> Result<(), String> {
-    style_store()?.delete(&id).map_err(|error| error.to_string())
+    style_store()?
+        .delete(&id)
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -556,9 +558,7 @@ async fn get_style_model_status() -> Result<StyleModelStatus, String> {
 
 /// Lane B: run the active guides' model rules against `text`. Slow; the UI must show progress.
 #[tauri::command]
-async fn style_check(
-    text: String,
-) -> Result<broadside_style::model::StyleCheckReport, String> {
+async fn style_check(text: String) -> Result<broadside_style::model::StyleCheckReport, String> {
     let guides = crate::style_guides::load_guides();
     let config = broadside_style::model::ModelConfig::default();
     tauri::async_runtime::spawn_blocking(move || {

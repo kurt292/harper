@@ -305,7 +305,9 @@ fn apply_suggestion_job(automation: &UIAutomation, mut arguments: Vec<JobArgumen
                     updated_text.chars().count()
                 ),
                 Err(error) => {
-                    eprintln!("Windows suggestion applied but the field could not be re-read: {error}")
+                    eprintln!(
+                        "Windows suggestion applied but the field could not be re-read: {error}"
+                    )
                 }
             }
             return JobResult::None;
@@ -314,7 +316,9 @@ fn apply_suggestion_job(automation: &UIAutomation, mut arguments: Vec<JobArgumen
             eprintln!("Selection write-back unavailable ({reason}); falling back to SetValue");
         }
         Err(SelectionApplyError::Aborted(reason)) => {
-            eprintln!("Selection write-back aborted before typing ({reason}); falling back to SetValue");
+            eprintln!(
+                "Selection write-back aborted before typing ({reason}); falling back to SetValue"
+            );
         }
     }
 
@@ -482,7 +486,11 @@ fn return_focus_to(
 }
 
 /// A range covering `len` characters starting at character offset `start` of the document.
-fn range_for_span(pattern: &UITextPattern, start: i32, len: i32) -> uiautomation::Result<UITextRange> {
+fn range_for_span(
+    pattern: &UITextPattern,
+    start: i32,
+    len: i32,
+) -> uiautomation::Result<UITextRange> {
     let range = pattern.get_document_range()?;
 
     range.move_endpoint_by_range(

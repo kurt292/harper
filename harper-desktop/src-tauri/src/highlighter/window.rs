@@ -115,7 +115,9 @@ impl Window {
             frames_presented: 0,
             last_logged_highlights: None,
             last_render: None,
-            label: monitor.name().unwrap_or_else(|| "unnamed monitor".to_string()),
+            label: monitor
+                .name()
+                .unwrap_or_else(|| "unnamed monitor".to_string()),
             monitor_size: PhysicalSize::new(size.width, size.height),
         })
     }
@@ -165,7 +167,10 @@ impl Window {
             && let (Some(width), Some(height)) =
                 (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         {
-            eprintln!("overlay {}: resized to {}x{}", self.label, size.width, size.height);
+            eprintln!(
+                "overlay {}: resized to {}x{}",
+                self.label, size.width, size.height
+            );
             self.painter
                 .on_window_resized(self.viewport_id, width, height);
             self.inner.request_redraw();
@@ -173,7 +178,11 @@ impl Window {
     }
 
     /// Renders unless a frame was presented within `max_age`.
-    pub fn render_if_stale(&mut self, render_state: &mut RenderState, max_age: std::time::Duration) {
+    pub fn render_if_stale(
+        &mut self,
+        render_state: &mut RenderState,
+        max_age: std::time::Duration,
+    ) {
         let fresh = self
             .last_render
             .is_some_and(|last| last.elapsed() < max_age);
@@ -197,7 +206,10 @@ impl Window {
         if self.last_logged_highlights != Some(highlights) {
             eprintln!(
                 "overlay {}: drawing {highlights} highlights, origin ({:.0},{:.0}), pixels_per_point {}",
-                self.label, origin.0, origin.1, context.pixels_per_point()
+                self.label,
+                origin.0,
+                origin.1,
+                context.pixels_per_point()
             );
             self.last_logged_highlights = Some(highlights);
         }

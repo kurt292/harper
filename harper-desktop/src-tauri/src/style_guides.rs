@@ -51,8 +51,7 @@ pub fn install_into(group: &mut LintGroup) {
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
-        .join("
-");
+        .join("\n");
     if let Ok(mut last) = LAST_CONFLICTS.lock()
         && last.as_deref() != Some(summary.as_str())
     {
