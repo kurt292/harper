@@ -138,8 +138,10 @@ impl OsBroker for WindowsBroker {
     fn cursor_position(&self) -> Option<Pos2> {
         let mut point = POINT::default();
 
+        // GetCursorPos fails with "Access is denied" while the lock screen or a UAC prompt owns
+        // the desktop. Report no cursor rather than take the highlighter down with a panic.
         unsafe {
-            GetCursorPos(&mut point).unwrap();
+            GetCursorPos(&mut point).ok()?;
         }
 
         let monitor_scale = get_focused_monitor_scale();

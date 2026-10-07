@@ -5,22 +5,62 @@ use tauri::tray::TrayIconBuilder;
 use tokio::time::sleep;
 use tracing::error;
 
-use tauri::menu::{Menu, MenuBuilder};
+use tauri::menu::{CheckMenuItem, Menu, MenuBuilder};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::runtime::Runtime as AsyncRuntime;
 
 use crate::highlighter_service::HighlighterService;
+use crate::style_guides;
 use crate::windows::{open_issue_report, show_editor_window, show_settings_window};
 
+const TRAY_ID: &str = "harper-tray";
+const STYLE_GUIDE_EVENT_PREFIX: &str = "style-guide:";
+
 /// Defines the layout of the tray menu.
+///
+/// Broadside: every style guide on disk gets a check item between the service toggle and the
+/// windows. The menu is rebuilt after each toggle so the check marks stay truthful.
 fn tray_menu<R: Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<Menu<R>> {
-    MenuBuilder::new(manager)
-        .text("toggle-service", "Toggle Service")
+    let mut builder = MenuBuilder::new(manager).text("toggle-service", "Toggle Service");
+
+    let guides = style_guides::load_guides();
+    if !guides.is_empty() {
+        builder = builder.separator();
+        for guide in &guides {
+            let item = CheckMenuItem::with_id(
+                manager,
+                format!("{STYLE_GUIDE_EVENT_PREFIX}{}", guide.id),
+                &guide.name,
+                true,
+                guide.active,
+                None::<&str>,
+            )?;
+            builder = builder.item(&item);
+        }
+        builder = builder.separator();
+    }
+
+    builder
         .text("open-editor", "Open Editor")
         .text("settings", "Settings")
         .text("report-issue", "Report Issue")
         .text("quit", "Quit")
         .build()
+}
+
+fn refresh_tray_menu(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        error!("Tray icon {TRAY_ID} not found while refreshing the menu");
+        return;
+    };
+    match tray_menu(app) {
+        Ok(menu) => {
+            if let Err(err) = tray.set_menu(Some(menu)) {
+                error!("Could not update the tray menu: {err}");
+            }
+        }
+        Err(err) => error!("Could not rebuild the tray menu: {err}"),
+    }
 }
 
 pub fn set_up_tray_menu(app: &AppHandle) -> tauri::Result<()> {
@@ -29,11 +69,24 @@ pub fn set_up_tray_menu(app: &AppHandle) -> tauri::Result<()> {
 
     let initial_is_running = highlighter_service.is_running();
 
-    let tray_icon = TrayIconBuilder::new()
+    let tray_icon = TrayIconBuilder::with_id(TRAY_ID)
         .icon(menu_bar_icon(initial_is_running)?)
         .menu(&tray_menu(app)?)
         .on_menu_event(move |app, event| {
             let event_id = event.id().0.as_str();
+
+            if let Some(guide_id) = event_id.strip_prefix(STYLE_GUIDE_EVENT_PREFIX) {
+                match style_guides::toggle(guide_id) {
+                    Ok(guide) => tracing::info!(
+                        "Style guide “{}” is now {}",
+                        guide.name,
+                        if guide.active { "active" } else { "inactive" }
+                    ),
+                    Err(err) => error!("Could not toggle style guide {guide_id}: {err}"),
+                }
+                refresh_tray_menu(app);
+                return;
+            }
 
             match event_id {
                 "toggle-service" => {

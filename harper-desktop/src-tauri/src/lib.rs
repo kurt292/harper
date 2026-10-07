@@ -42,6 +42,7 @@ pub mod highlighter_service;
 pub mod lint_kind_color;
 mod os_broker;
 pub mod rect;
+pub mod style_guides;
 
 #[cfg(target_os = "macos")]
 mod mac_broker;
@@ -163,6 +164,8 @@ pub fn run_tauri() {
             }
         }
     };
+
+    style_guides::ensure_samples();
 
     let broker = platform_broker(|_| false);
 

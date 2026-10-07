@@ -596,6 +596,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 
 [[package]]
+name = "broadside-style"
+version = "0.1.0"
+dependencies = [
+ "harper-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "brotli"
 version = "8.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3813,6 +3824,7 @@ dependencies = [
  "accessibility",
  "accessibility-sys",
  "base64 0.23.1",
+ "broadside-style",
  "cached",
  "clap",
  "core-foundation 0.10.1",

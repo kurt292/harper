@@ -166,8 +166,15 @@ impl Config {
     }
 
     pub fn create_linter(&self) -> LintGroup {
-        LintGroup::new_curated(self.create_dictionary(), self.dialect)
-            .with_lint_config(self.lint_config.clone())
+        let mut group = LintGroup::new_curated(self.create_dictionary(), self.dialect)
+            .with_lint_config(self.lint_config.clone());
+        crate::style_guides::install_into(&mut group);
+        group
+    }
+
+    /// Broadside style guides live beside the main config as one JSON file per guide.
+    pub fn style_guides_dir() -> Option<PathBuf> {
+        Self::folder_path().map(|path| path.join("style-guides"))
     }
 
     #[allow(dead_code)]
