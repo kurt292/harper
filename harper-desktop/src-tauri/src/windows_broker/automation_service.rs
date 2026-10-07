@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::iter::once;
 use std::sync::mpsc::{
-    Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, TrySendError, channel,
+    Receiver, Sender, SyncSender, TryRecvError, TrySendError, channel,
     sync_channel,
 };
 use std::thread::sleep;
@@ -71,11 +71,12 @@ pub enum Read<T> {
     Unavailable,
 }
 
-/// Applying a suggestion types into the target and verifies it, so it needs longer.
-const APPLY_JOB_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long to wait for room in the job queue when the user applies a suggestion.
+const APPLY_QUEUE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// A worker stuck inside UI Automation for this long is abandoned and replaced.
-const STUCK_WORKER_TIMEOUT: Duration = Duration::from_secs(5);
+/// A worker stuck inside UI Automation for this long is abandoned and replaced. Applying a
+/// suggestion legitimately takes a few seconds (focus return, typing, verification).
+const STUCK_WORKER_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 struct ApplySuggestionRequest {
@@ -266,8 +267,8 @@ impl AutomationService {
         }
     }
 
-    /// Applies a suggestion. This one waits, bounded, because it is a user action whose outcome
-    /// matters and which types into the target application.
+    /// Queues a suggestion for the worker to apply. Returns as soon as the job is queued; the job
+    /// returns focus to the target, types, and verifies on the worker thread.
     pub fn apply_suggestion(
         &mut self,
         expected_text: String,
@@ -290,9 +291,9 @@ impl AutomationService {
         };
         worker_data.next_job_id += 1;
         let id = worker_data.next_job_id;
-        let deadline = Instant::now() + APPLY_JOB_TIMEOUT;
+        let deadline = Instant::now() + APPLY_QUEUE_TIMEOUT;
 
-        // The queue holds one job; wait for room behind any read in progress.
+        // The queue holds one job; wait briefly for room behind any read in progress.
         let mut payload = (
             id,
             apply_suggestion_job as WorkerJob,
@@ -312,44 +313,13 @@ impl AutomationService {
                 Err(TrySendError::Disconnected(_)) => return,
             }
         }
+        // The job reports its own outcome on stderr; the overlay's next read shows the result.
         worker_data.pending.push_back(PendingJob {
             id,
             kind: JobKind::Apply,
             fingerprint: 0,
             since: Instant::now(),
         });
-
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match worker_data.receiver.recv_timeout(remaining) {
-                Ok((result_id, result)) => {
-                    if let Some(index) = worker_data
-                        .pending
-                        .iter()
-                        .position(|job| job.id == result_id)
-                    {
-                        let job = worker_data
-                            .pending
-                            .remove(index)
-                            .expect("index came from position");
-                        if result_id == id {
-                            return;
-                        }
-                        worker_data
-                            .completed
-                            .insert(job.kind, (job.fingerprint, result));
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    eprintln!(
-                        "Applying the suggestion exceeded {} s; giving up on it",
-                        APPLY_JOB_TIMEOUT.as_secs()
-                    );
-                    return;
-                }
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-        }
     }
 
     /// Bounding boxes for `spans` in `text`, as of the latest finished read for exactly those
@@ -425,8 +395,8 @@ const FOCUS_RETURN_TIMEOUT: Duration = Duration::from_millis(400);
 /// How long to wait for the user to release modifier keys before typing a replacement.
 const MODIFIER_RELEASE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// How long to give the target application to process simulated input before re-reading.
-const POST_INPUT_SETTLE: Duration = Duration::from_millis(120);
+/// How long to keep re-reading the field after simulated input before calling it a mismatch.
+const POST_INPUT_VERIFY: Duration = Duration::from_millis(1500);
 
 /// Why the selection-based write-back could not be used.
 enum SelectionApplyError {
@@ -490,9 +460,18 @@ fn apply_suggestion_job(automation: &UIAutomation, mut arguments: Vec<JobArgumen
         &request.suggestion,
     ) {
         Ok(()) => {
-            sleep(POST_INPUT_SETTLE);
-            match get_text(&element) {
-                Ok(after) if after == updated_text => {}
+            // Simulated keystrokes land over a few frames; poll until the field matches.
+            let deadline = Instant::now() + POST_INPUT_VERIFY;
+            let mut last_read: std::result::Result<String, String> = Err("not read".to_string());
+            while Instant::now() < deadline {
+                sleep(Duration::from_millis(50));
+                last_read = get_text(&element).map_err(|error| error.to_string());
+                if last_read.as_deref() == Ok(updated_text.as_str()) {
+                    eprintln!("Windows suggestion applied and verified");
+                    return JobResult::None;
+                }
+            }
+            match last_read {
                 Ok(after) => eprintln!(
                     "Windows suggestion applied but the field reads differently than expected \
                      ({} chars vs {} expected); leaving it for the user",
