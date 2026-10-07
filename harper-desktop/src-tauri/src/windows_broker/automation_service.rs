@@ -1,6 +1,9 @@
+use std::collections::{HashMap, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::iter::once;
 use std::sync::mpsc::{
-    Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, channel, sync_channel,
+    Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, TrySendError, channel,
+    sync_channel,
 };
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -30,19 +33,43 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// Information about a worker thread.
 ///
-/// Every job carries a sequence number so a result that arrives after its caller gave up
-/// waiting can be told apart from the one the caller wants now.
+/// Reads never block the caller. A job is queued, the caller carries on with whatever it had,
+/// and the result is collected on a later call. Every job carries a sequence number and the
+/// fingerprint of its inputs, so a result is only handed back to a caller asking about the same
+/// window and text it was computed for.
 struct WorkerData {
     sender: SyncSender<(u64, WorkerJob, Vec<JobArgument>)>,
     receiver: Receiver<(u64, JobResult)>,
     next_job_id: u64,
-    /// A job whose caller timed out and that the worker may still be running.
-    in_flight: Option<(u64, Instant)>,
+    /// Jobs queued or running, oldest first.
+    pending: VecDeque<PendingJob>,
+    /// The latest finished result per job kind, with the fingerprint it was computed for.
+    completed: HashMap<JobKind, (u64, JobResult)>,
 }
 
-/// How long a read job (text, rectangles) may hold the highlighter's event loop. Past this the
-/// overlay keeps its last lints and tries again next tick.
-const READ_JOB_TIMEOUT: Duration = Duration::from_millis(150);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum JobKind {
+    Text,
+    Rects,
+    Apply,
+}
+
+struct PendingJob {
+    id: u64,
+    kind: JobKind,
+    fingerprint: u64,
+    since: Instant,
+}
+
+/// Outcome of a non-blocking read.
+pub enum Read<T> {
+    /// A result computed for exactly these inputs.
+    Ready(T),
+    /// The worker has not answered yet; keep whatever was shown last.
+    Pending,
+    /// The worker answered that there is nothing to read.
+    Unavailable,
+}
 
 /// Applying a suggestion types into the target and verifies it, so it needs longer.
 const APPLY_JOB_TIMEOUT: Duration = Duration::from_secs(3);
@@ -135,7 +162,8 @@ impl AutomationService {
             receiver: result_receiver,
             sender: job_sender,
             next_job_id: 0,
-            in_flight: None,
+            pending: VecDeque::new(),
+            completed: HashMap::new(),
         });
     }
 
@@ -145,83 +173,101 @@ impl AutomationService {
         self.worker_data = None;
     }
 
-    /// Runs a job on the worker thread, waiting at most `timeout` for its result.
+    /// Moves finished results from the worker into `completed`, and replaces a worker that has
+    /// been stuck inside UI Automation for too long.
     ///
     /// The caller is the highlighter's event loop. A UI Automation call that blocks (a huge
-    /// browser tree, an unresponsive provider) must not block that loop, or Windows reports the
-    /// overlay as hung and closes it. On timeout the job is left running, the caller gets `None`
-    /// (the overlay keeps its last lints), and the late result is discarded when it arrives. A
-    /// worker that stays stuck is abandoned and replaced.
-    fn run_worker_job(
-        &mut self,
-        job: WorkerJob,
-        arguments: Vec<JobArgument>,
-        timeout: Duration,
-    ) -> Option<JobResult> {
-        let worker_data = self.worker_data.as_mut()?;
+    /// browser tree, an unresponsive provider) must never block that loop, or Windows reports the
+    /// overlay as hung and closes it. Nothing in the read path waits on the worker.
+    fn collect_results(&mut self) {
+        let Some(worker_data) = self.worker_data.as_mut() else {
+            return;
+        };
 
-        // Discard results of jobs whose callers stopped waiting.
-        while let Ok((id, _)) = worker_data.receiver.try_recv() {
-            if worker_data
-                .in_flight
-                .is_some_and(|(pending, _)| pending == id)
-            {
-                worker_data.in_flight = None;
+        while let Ok((id, result)) = worker_data.receiver.try_recv() {
+            if let Some(index) = worker_data.pending.iter().position(|job| job.id == id) {
+                let job = worker_data
+                    .pending
+                    .remove(index)
+                    .expect("index came from position");
+                worker_data
+                    .completed
+                    .insert(job.kind, (job.fingerprint, result));
             }
         }
 
-        if let Some((_, since)) = worker_data.in_flight {
-            if since.elapsed() < STUCK_WORKER_TIMEOUT {
-                return None;
-            }
+        if let Some(oldest) = worker_data.pending.front()
+            && oldest.since.elapsed() > STUCK_WORKER_TIMEOUT
+        {
             eprintln!(
                 "UI Automation worker stuck for {} ms; replacing it",
-                since.elapsed().as_millis()
+                oldest.since.elapsed().as_millis()
             );
             self.start_worker_thread();
-            return None;
+        }
+    }
+
+    /// Queues a job of `kind` unless one is already outstanding. Never blocks.
+    fn submit(
+        &mut self,
+        kind: JobKind,
+        fingerprint: u64,
+        job: WorkerJob,
+        arguments: Vec<JobArgument>,
+    ) {
+        let Some(worker_data) = self.worker_data.as_mut() else {
+            return;
+        };
+        if worker_data.pending.iter().any(|job| job.kind == kind) {
+            return;
         }
 
         worker_data.next_job_id += 1;
         let id = worker_data.next_job_id;
-        if worker_data.sender.try_send((id, job, arguments)).is_err() {
-            return None;
-        }
-
-        loop {
-            match worker_data.receiver.recv_timeout(timeout) {
-                Ok((result_id, result)) if result_id == id => return Some(result),
-                Ok(_) => continue, // a straggler from an earlier timed-out job
-                Err(RecvTimeoutError::Timeout) => {
-                    eprintln!(
-                        "UI Automation job exceeded {} ms; overlay keeps its last lints",
-                        timeout.as_millis()
-                    );
-                    worker_data.in_flight = Some((id, Instant::now()));
-                    return None;
-                }
-                Err(RecvTimeoutError::Disconnected) => return None,
-            }
+        if worker_data.sender.try_send((id, job, arguments)).is_ok() {
+            worker_data.pending.push_back(PendingJob {
+                id,
+                kind,
+                fingerprint,
+                since: Instant::now(),
+            });
         }
     }
 
-    /// Grab text from the worker.
-    /// Attempts to get the most up-to-date information possible.
-    /// Returns `None` if the worker is not running.
-    pub fn get_text(&mut self) -> Option<String> {
-        let window = self.resolve_focused_window()?;
-        let result = self.run_worker_job(
-            get_text_job,
-            vec![JobArgument::Window(window)],
-            READ_JOB_TIMEOUT,
-        )?;
-
-        match result {
-            JobResult::String(text) => Some(text),
+    /// Takes the finished result for `kind` if it was computed for `fingerprint`. A result for
+    /// other inputs is stale and dropped.
+    fn take_completed(&mut self, kind: JobKind, fingerprint: u64) -> Option<JobResult> {
+        let worker_data = self.worker_data.as_mut()?;
+        match worker_data.completed.remove(&kind) {
+            Some((computed_for, result)) if computed_for == fingerprint => Some(result),
             _ => None,
         }
     }
 
+    /// The focused field's text, as of the latest finished read. Queues the next read.
+    pub fn get_text(&mut self) -> Read<String> {
+        let Some(window) = self.resolve_focused_window() else {
+            return Read::Unavailable;
+        };
+        self.collect_results();
+
+        let fingerprint = window as u64;
+        self.submit(
+            JobKind::Text,
+            fingerprint,
+            get_text_job,
+            vec![JobArgument::Window(window)],
+        );
+
+        match self.take_completed(JobKind::Text, fingerprint) {
+            Some(JobResult::String(text)) => Read::Ready(text),
+            Some(_) => Read::Unavailable,
+            None => Read::Pending,
+        }
+    }
+
+    /// Applies a suggestion. This one waits, bounded, because it is a user action whose outcome
+    /// matters and which types into the target application.
     pub fn apply_suggestion(
         &mut self,
         expected_text: String,
@@ -231,6 +277,7 @@ impl AutomationService {
         let Some(window) = self.resolve_focused_window() else {
             return;
         };
+        self.collect_results();
 
         let request = ApplySuggestionRequest {
             window,
@@ -238,36 +285,112 @@ impl AutomationService {
             span,
             suggestion,
         };
+        let Some(worker_data) = self.worker_data.as_mut() else {
+            return;
+        };
+        worker_data.next_job_id += 1;
+        let id = worker_data.next_job_id;
+        let deadline = Instant::now() + APPLY_JOB_TIMEOUT;
 
-        let _ = self.run_worker_job(
-            apply_suggestion_job,
+        // The queue holds one job; wait for room behind any read in progress.
+        let mut payload = (
+            id,
+            apply_suggestion_job as WorkerJob,
             vec![JobArgument::ApplySuggestion(request)],
-            APPLY_JOB_TIMEOUT,
         );
+        loop {
+            match worker_data.sender.try_send(payload) {
+                Ok(()) => break,
+                Err(TrySendError::Full(returned)) => {
+                    if Instant::now() > deadline {
+                        eprintln!("Could not apply the suggestion: UI Automation worker is busy");
+                        return;
+                    }
+                    payload = returned;
+                    sleep(Duration::from_millis(10));
+                }
+                Err(TrySendError::Disconnected(_)) => return,
+            }
+        }
+        worker_data.pending.push_back(PendingJob {
+            id,
+            kind: JobKind::Apply,
+            fingerprint: 0,
+            since: Instant::now(),
+        });
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match worker_data.receiver.recv_timeout(remaining) {
+                Ok((result_id, result)) => {
+                    if let Some(index) = worker_data
+                        .pending
+                        .iter()
+                        .position(|job| job.id == result_id)
+                    {
+                        let job = worker_data
+                            .pending
+                            .remove(index)
+                            .expect("index came from position");
+                        if result_id == id {
+                            return;
+                        }
+                        worker_data
+                            .completed
+                            .insert(job.kind, (job.fingerprint, result));
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    eprintln!(
+                        "Applying the suggestion exceeded {} s; giving up on it",
+                        APPLY_JOB_TIMEOUT.as_secs()
+                    );
+                    return;
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
     }
 
-    /// Pass a collection of text spans to the worker and have it compute the associated bounding boxes for each span.
-    /// Each span may have multiple bounding boxes.
-    /// Input spans share the same index as their output bounding box.
+    /// Bounding boxes for `spans` in `text`, as of the latest finished read for exactly those
+    /// inputs. Queues the next read. Each span may have multiple bounding boxes; input spans share
+    /// the same index as their output bounding box.
     pub fn get_bounding_boxes(
         &mut self,
         text: &str,
         spans: impl IntoIterator<Item = Span<char>>,
-    ) -> Option<Vec<Vec<Rect>>> {
-        let window = self.resolve_focused_window()?;
+    ) -> Read<Vec<Vec<Rect>>> {
+        let Some(window) = self.resolve_focused_window() else {
+            return Read::Unavailable;
+        };
+        self.collect_results();
 
-        let result = self.run_worker_job(
+        let spans: Vec<Span<char>> = spans.into_iter().collect();
+        let fingerprint = {
+            let mut hasher = DefaultHasher::new();
+            window.hash(&mut hasher);
+            text.hash(&mut hasher);
+            for span in &spans {
+                span.start.hash(&mut hasher);
+                span.end.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+
+        self.submit(
+            JobKind::Rects,
+            fingerprint,
             get_bounding_rect_job,
             once(JobArgument::Window(window))
                 .chain(once(JobArgument::Text(text.to_string())))
                 .chain(spans.into_iter().map(JobArgument::Span))
                 .collect(),
-            READ_JOB_TIMEOUT,
-        )?;
+        );
 
-        match result {
-            JobResult::GroupedRects(rects) => Some(rects),
-            _ => None,
+        match self.take_completed(JobKind::Rects, fingerprint) {
+            Some(JobResult::GroupedRects(rects)) => Read::Ready(rects),
+            Some(_) => Read::Unavailable,
+            None => Read::Pending,
         }
     }
 

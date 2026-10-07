@@ -1,4 +1,4 @@
-use crate::windows_broker::automation_service::AutomationService;
+use crate::windows_broker::automation_service::{AutomationService, Read};
 use crate::{
     os_broker::{AccessibilityPermissionStatus, AppSearchResult, OsBroker},
     rect::ActionableLint,
@@ -106,9 +106,15 @@ impl OsBroker for WindowsBroker {
             None => return None,
         }
 
-        let Some(text) = self.service.lock().ok()?.get_text() else {
-            self.diagnose("no lintable focused text field (get_text returned nothing)".to_string());
-            return None;
+        let text_read = self.service.lock().ok()?.get_text();
+        let text = match text_read {
+            Read::Ready(text) => text,
+            // The worker has not answered yet; the overlay keeps what it last showed.
+            Read::Pending => return None,
+            Read::Unavailable => {
+                self.diagnose("no lintable focused text field".to_string());
+                return None;
+            }
         };
         if text.len() > 16_000 {
             self.diagnose(format!(
@@ -120,17 +126,21 @@ impl OsBroker for WindowsBroker {
 
         let lints = lint_text(&text);
         let lint_count: usize = lints.values().map(Vec::len).sum();
-        let Some(rects) = self
+        let rects_read = self
             .service
             .lock()
             .ok()?
-            .get_bounding_boxes(&text, lints.values().flatten().map(|lint| lint.span))
-        else {
-            self.diagnose(format!(
-                "{} chars, {lint_count} lints, but bounding boxes unavailable",
-                text.chars().count()
-            ));
-            return None;
+            .get_bounding_boxes(&text, lints.values().flatten().map(|lint| lint.span));
+        let rects = match rects_read {
+            Read::Ready(rects) => rects,
+            Read::Pending => return None,
+            Read::Unavailable => {
+                self.diagnose(format!(
+                    "{} chars, {lint_count} lints, but bounding boxes unavailable",
+                    text.chars().count()
+                ));
+                return None;
+            }
         };
         let first_rect = rects
             .iter()
