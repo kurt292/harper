@@ -1,5 +1,7 @@
 use std::iter::once;
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
+use std::sync::mpsc::{
+    Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, channel, sync_channel,
+};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -27,10 +29,26 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Information about a worker thread.
+///
+/// Every job carries a sequence number so a result that arrives after its caller gave up
+/// waiting can be told apart from the one the caller wants now.
 struct WorkerData {
-    sender: SyncSender<(WorkerJob, Vec<JobArgument>)>,
-    receiver: Receiver<JobResult>,
+    sender: SyncSender<(u64, WorkerJob, Vec<JobArgument>)>,
+    receiver: Receiver<(u64, JobResult)>,
+    next_job_id: u64,
+    /// A job whose caller timed out and that the worker may still be running.
+    in_flight: Option<(u64, Instant)>,
 }
+
+/// How long a read job (text, rectangles) may hold the highlighter's event loop. Past this the
+/// overlay keeps its last lints and tries again next tick.
+const READ_JOB_TIMEOUT: Duration = Duration::from_millis(150);
+
+/// Applying a suggestion types into the target and verifies it, so it needs longer.
+const APPLY_JOB_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A worker stuck inside UI Automation for this long is abandoned and replaced.
+const STUCK_WORKER_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 struct ApplySuggestionRequest {
@@ -83,8 +101,11 @@ impl AutomationService {
     /// Starts the worker thread if it is not already running.
     /// Does nothing if the worker thread is already running.
     fn start_worker_thread(&mut self) {
-        let (job_sender, job_receiver) = sync_channel::<(WorkerJob, Vec<JobArgument>)>(1);
-        let (result_sender, result_receiver) = sync_channel(1);
+        let (job_sender, job_receiver) = sync_channel::<(u64, WorkerJob, Vec<JobArgument>)>(1);
+        let (result_sender, result_receiver): (
+            Sender<(u64, JobResult)>,
+            Receiver<(u64, JobResult)>,
+        ) = channel();
 
         std::thread::spawn(move || {
             let automation = UIAutomation::new().unwrap();
@@ -97,14 +118,12 @@ impl AutomationService {
                     Ok(job) => Some(job),
                 };
 
-                if let Some((job, arguments)) = job {
+                if let Some((id, job, arguments)) = job {
                     let result = job(&automation, arguments);
 
                     // Stop the thread if the other side of the channel has been closed (or dropped).
-                    if let Err(err) = result_sender.try_send(result) {
-                        if let TrySendError::Disconnected(_) = err {
-                            break;
-                        }
+                    if result_sender.send((id, result)).is_err() {
+                        break;
                     }
                 }
 
@@ -115,6 +134,8 @@ impl AutomationService {
         self.worker_data = Some(WorkerData {
             receiver: result_receiver,
             sender: job_sender,
+            next_job_id: 0,
+            in_flight: None,
         });
     }
 
@@ -124,22 +145,64 @@ impl AutomationService {
         self.worker_data = None;
     }
 
-    /// Attempts to run a worker job on the worker thread. Returns `None` if the worker thread does not exist.
-    fn run_worker_job(&self, job: WorkerJob, arguments: Vec<JobArgument>) -> Option<JobResult> {
-        let worker_data = self.worker_data.as_ref()?;
-        let started = Instant::now();
-        worker_data.sender.send((job, arguments)).unwrap();
-        let result = worker_data.receiver.recv().unwrap();
+    /// Runs a job on the worker thread, waiting at most `timeout` for its result.
+    ///
+    /// The caller is the highlighter's event loop. A UI Automation call that blocks (a huge
+    /// browser tree, an unresponsive provider) must not block that loop, or Windows reports the
+    /// overlay as hung and closes it. On timeout the job is left running, the caller gets `None`
+    /// (the overlay keeps its last lints), and the late result is discarded when it arrives. A
+    /// worker that stays stuck is abandoned and replaced.
+    fn run_worker_job(
+        &mut self,
+        job: WorkerJob,
+        arguments: Vec<JobArgument>,
+        timeout: Duration,
+    ) -> Option<JobResult> {
+        let worker_data = self.worker_data.as_mut()?;
 
-        // The caller is the highlighter's event loop; anything slow here is a frozen overlay.
-        let elapsed = started.elapsed();
-        if elapsed > SLOW_JOB_WARNING {
-            eprintln!(
-                "Windows UI Automation job took {} ms (overlay cannot repaint meanwhile)",
-                elapsed.as_millis()
-            );
+        // Discard results of jobs whose callers stopped waiting.
+        while let Ok((id, _)) = worker_data.receiver.try_recv() {
+            if worker_data
+                .in_flight
+                .is_some_and(|(pending, _)| pending == id)
+            {
+                worker_data.in_flight = None;
+            }
         }
-        Some(result)
+
+        if let Some((_, since)) = worker_data.in_flight {
+            if since.elapsed() < STUCK_WORKER_TIMEOUT {
+                return None;
+            }
+            eprintln!(
+                "UI Automation worker stuck for {} ms; replacing it",
+                since.elapsed().as_millis()
+            );
+            self.start_worker_thread();
+            return None;
+        }
+
+        worker_data.next_job_id += 1;
+        let id = worker_data.next_job_id;
+        if worker_data.sender.try_send((id, job, arguments)).is_err() {
+            return None;
+        }
+
+        loop {
+            match worker_data.receiver.recv_timeout(timeout) {
+                Ok((result_id, result)) if result_id == id => return Some(result),
+                Ok(_) => continue, // a straggler from an earlier timed-out job
+                Err(RecvTimeoutError::Timeout) => {
+                    eprintln!(
+                        "UI Automation job exceeded {} ms; overlay keeps its last lints",
+                        timeout.as_millis()
+                    );
+                    worker_data.in_flight = Some((id, Instant::now()));
+                    return None;
+                }
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
     }
 
     /// Grab text from the worker.
@@ -147,7 +210,11 @@ impl AutomationService {
     /// Returns `None` if the worker is not running.
     pub fn get_text(&mut self) -> Option<String> {
         let window = self.resolve_focused_window()?;
-        let result = self.run_worker_job(get_text_job, vec![JobArgument::Window(window)])?;
+        let result = self.run_worker_job(
+            get_text_job,
+            vec![JobArgument::Window(window)],
+            READ_JOB_TIMEOUT,
+        )?;
 
         match result {
             JobResult::String(text) => Some(text),
@@ -175,6 +242,7 @@ impl AutomationService {
         let _ = self.run_worker_job(
             apply_suggestion_job,
             vec![JobArgument::ApplySuggestion(request)],
+            APPLY_JOB_TIMEOUT,
         );
     }
 
@@ -194,6 +262,7 @@ impl AutomationService {
                 .chain(once(JobArgument::Text(text.to_string())))
                 .chain(spans.into_iter().map(JobArgument::Span))
                 .collect(),
+            READ_JOB_TIMEOUT,
         )?;
 
         match result {
@@ -225,9 +294,6 @@ impl Drop for AutomationService {
 // ---------------------------------------------------------------------------
 // Applying suggestions
 // ---------------------------------------------------------------------------
-
-/// UIA jobs slower than this get logged; they stall the overlay's event loop.
-const SLOW_JOB_WARNING: Duration = Duration::from_millis(250);
 
 /// How long to wait for the target field to regain keyboard focus after the user clicks a
 /// suggestion in Harper's overlay.
