@@ -32,6 +32,8 @@ mod automation_service;
 pub struct WindowsBroker {
     service: Arc<Mutex<AutomationService>>,
     is_integration_enabled: Box<dyn FnMut(&str) -> bool + Send>,
+    /// Last diagnostic state, so the log only changes when the situation does.
+    last_diagnostic: Option<String>,
 }
 
 impl WindowsBroker {
@@ -41,6 +43,15 @@ impl WindowsBroker {
         Self {
             service: Arc::new(Mutex::new(AutomationService::create_and_start())),
             is_integration_enabled: Box::new(is_integration_enabled),
+            last_diagnostic: None,
+        }
+    }
+
+    /// Logs `message` once per change. Never include field text.
+    fn diagnose(&mut self, message: String) {
+        if self.last_diagnostic.as_deref() != Some(message.as_str()) {
+            eprintln!("broker: {message}");
+            self.last_diagnostic = Some(message);
         }
     }
 
@@ -50,7 +61,12 @@ impl WindowsBroker {
         let path = get_window_path(focused_window).ok()?;
         drop(service);
 
+        let exe = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if !(self.is_integration_enabled)(&path.to_string_lossy()) {
+            self.diagnose(format!("{exe}: integration disabled, not linting"));
             return Some(false);
         }
 
@@ -90,17 +106,34 @@ impl OsBroker for WindowsBroker {
             None => return None,
         }
 
-        let text = self.service.lock().ok()?.get_text()?;
+        let Some(text) = self.service.lock().ok()?.get_text() else {
+            self.diagnose("no lintable focused text field (get_text returned nothing)".to_string());
+            return None;
+        };
         if text.len() > 16_000 {
+            self.diagnose(format!("field has {} bytes, over the 16k limit; skipping", text.len()));
             return Some(Vec::new());
         }
 
         let lints = lint_text(&text);
-        let rects = self
+        let lint_count: usize = lints.values().map(Vec::len).sum();
+        let Some(rects) = self
             .service
             .lock()
             .ok()?
-            .get_bounding_boxes(&text, lints.values().flatten().map(|lint| lint.span))?;
+            .get_bounding_boxes(&text, lints.values().flatten().map(|lint| lint.span))
+        else {
+            self.diagnose(format!(
+                "{} chars, {lint_count} lints, but bounding boxes unavailable",
+                text.chars().count()
+            ));
+            return None;
+        };
+        self.diagnose(format!(
+            "{} chars, {lint_count} lints, {} rects",
+            text.chars().count(),
+            rects.iter().map(Vec::len).sum::<usize>()
+        ));
 
         Some(
             lints

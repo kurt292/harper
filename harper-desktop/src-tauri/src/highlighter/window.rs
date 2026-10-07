@@ -178,8 +178,16 @@ impl Window {
     pub fn render(&mut self, render_state: &mut RenderState) {
         let context = self.egui_state.egui_ctx().clone();
         let input = self.egui_state.take_egui_input(&self.inner);
+        // This window's top-left in the broker's coordinate space (physical pixels divided by the
+        // monitor scale), so a second-monitor overlay draws relative to itself.
+        let scale = self.inner.scale_factor();
+        let origin = self
+            .inner
+            .outer_position()
+            .map(|position| (position.x as f64 / scale, position.y as f64 / scale))
+            .unwrap_or((0.0, 0.0));
         let output = context.run_ui(input, |ui| {
-            render_state.render(ui);
+            render_state.render(ui, origin);
         });
 
         self.egui_state

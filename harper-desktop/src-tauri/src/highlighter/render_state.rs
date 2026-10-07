@@ -149,15 +149,21 @@ impl RenderState {
 
     /// Draws highlights and the active popup from the same state used by hit-testing so visible
     /// regions and clickable regions do not drift apart.
-    pub fn render(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// Lint rectangles are in screen coordinates; `origin` is the top-left of the overlay window
+    /// being painted, in the same coordinate space, so a window that does not start at 0,0 (a
+    /// second monitor) draws its highlights where they belong. Hit-testing stays in screen space.
+    pub fn render(&mut self, ui: &mut egui::Ui, origin: (f64, f64)) {
+        let local = |rect: &Rect| Rect::new(rect.x - origin.0, rect.y - origin.1, rect.width, rect.height);
+
         for positioned_lint in self.lints() {
-            draw_highlight(ui, &positioned_lint.rect, &positioned_lint.lint);
+            draw_highlight(ui, &local(&positioned_lint.rect), &positioned_lint.lint);
         }
 
         if let Some(index) = self.highlighted_lint
             && let Some(positioned_lint) = self.lints().get(index)
         {
-            let rect = positioned_lint.rect;
+            let rect = local(&positioned_lint.rect);
             let lint = positioned_lint.lint.clone();
             let source_text = positioned_lint.source_text.clone();
 
