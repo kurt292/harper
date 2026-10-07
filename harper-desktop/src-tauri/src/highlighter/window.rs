@@ -24,6 +24,8 @@ pub struct Window {
     painter: Painter,
     viewport_id: egui::ViewportId,
     frames_presented: u64,
+    /// Highlight count at the last log line, so the log only speaks when it changes.
+    last_logged_highlights: Option<usize>,
     /// When this window last presented a frame. See `WindowManager` for why other windows'
     /// redraws may trigger this one.
     last_render: Option<std::time::Instant>,
@@ -38,8 +40,12 @@ impl Window {
     pub async fn new(
         event_loop: &ActiveEventLoop,
         monitor: MonitorHandle,
-        context: egui::Context,
+        _shared_context: egui::Context,
     ) -> Result<Self, Error> {
+        // Each overlay gets its own egui context. A context hands its font atlas to the first
+        // renderer that runs a frame and sends later renderers only atlas *updates*, which makes
+        // egui-wgpu panic ("texture that has not been allocated yet") on a second monitor.
+        let context = egui::Context::default();
         let position = monitor.position();
         // One pixel shorter than the monitor on purpose. A borderless always-on-top window that
         // covers a monitor exactly is eligible for the compositor's direct-scanout path, which
@@ -107,6 +113,7 @@ impl Window {
             painter,
             viewport_id,
             frames_presented: 0,
+            last_logged_highlights: None,
             last_render: None,
             label: monitor.name().unwrap_or_else(|| "unnamed monitor".to_string()),
             monitor_size: PhysicalSize::new(size.width, size.height),
@@ -186,6 +193,14 @@ impl Window {
             .outer_position()
             .map(|position| (position.x as f64 / scale, position.y as f64 / scale))
             .unwrap_or((0.0, 0.0));
+        let highlights = render_state.lint_count();
+        if self.last_logged_highlights != Some(highlights) {
+            eprintln!(
+                "overlay {}: drawing {highlights} highlights, origin ({:.0},{:.0}), pixels_per_point {}",
+                self.label, origin.0, origin.1, context.pixels_per_point()
+            );
+            self.last_logged_highlights = Some(highlights);
+        }
         let output = context.run_ui(input, |ui| {
             render_state.render(ui, origin);
         });

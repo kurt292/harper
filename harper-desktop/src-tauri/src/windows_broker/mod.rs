@@ -129,8 +129,14 @@ impl OsBroker for WindowsBroker {
             ));
             return None;
         };
+        let first_rect = rects
+            .iter()
+            .flatten()
+            .next()
+            .map(|r| format!(" first rect x={:.0} y={:.0} w={:.0} h={:.0} (scale {:.2})", r.x, r.y, r.width, r.height, get_focused_monitor_scale()))
+            .unwrap_or_default();
         self.diagnose(format!(
-            "{} chars, {lint_count} lints, {} rects",
+            "{} chars, {lint_count} lints, {} rects{first_rect}",
             text.chars().count(),
             rects.iter().map(Vec::len).sum::<usize>()
         ));

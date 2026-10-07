@@ -111,6 +111,11 @@ impl RenderState {
         self.last_lints.as_deref().unwrap_or_default()
     }
 
+    /// How many highlights the next frame will draw. For diagnostics.
+    pub fn lint_count(&self) -> usize {
+        self.lints().len()
+    }
+
     /// Updates which lint owns the suggestion popup without exposing render-state internals.
     ///
     /// Window/input code decides what the user interacted with, while `RenderState` owns the popup

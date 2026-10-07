@@ -40,11 +40,26 @@ pub fn load_guides() -> Vec<StyleGuide> {
     }
 }
 
-/// Adds the active guides' deterministic rules to `group`, logging any conflicts.
+/// Adds the active guides' deterministic rules to `group`, logging conflicts when they change.
+/// Linters are rebuilt every second, so logging on every build would repeat forever.
 pub fn install_into(group: &mut LintGroup) {
+    static LAST_CONFLICTS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
     let guides = load_guides();
-    for conflict in broadside_style::install(group, &guides) {
-        warn!("Style guide conflict: {conflict}");
+    let conflicts = broadside_style::install(group, &guides);
+    let summary = conflicts
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("
+");
+    if let Ok(mut last) = LAST_CONFLICTS.lock()
+        && last.as_deref() != Some(summary.as_str())
+    {
+        for conflict in &conflicts {
+            warn!("Style guide conflict: {conflict}");
+        }
+        *last = Some(summary);
     }
 }
 
