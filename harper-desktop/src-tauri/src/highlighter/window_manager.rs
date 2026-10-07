@@ -23,6 +23,9 @@ const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Windows chose to send WM_PAINT to.
 const STALE_FRAME_AGE: Duration = Duration::from_millis(16);
 
+/// Overlays idle longer than this are painted from `about_to_wait` even with no paint message.
+const IDLE_FRAME_AGE: Duration = Duration::from_millis(33);
+
 /// Owns the winit event loop and the overlay windows created for each monitor.
 ///
 /// `WindowManager` is intentionally separate from `Highlighter` because winit event-loop ownership
@@ -222,6 +225,12 @@ impl ApplicationHandler for WindowManagerApp {
         let now = Instant::now();
 
         self.read_rect_updates();
+
+        // Belt and braces for the WM_PAINT starvation described in `window_event`: paint any
+        // overlay that has not presented recently, without waiting for Windows to ask.
+        for window in &mut self.windows {
+            window.render_if_stale(&mut self.render_state, IDLE_FRAME_AGE);
+        }
 
         if now.duration_since(self.last_config_poll) >= CONFIG_POLL_INTERVAL {
             self.refresh_config();
