@@ -49,7 +49,8 @@ pub fn lint_kind_color(lint_kind: LintKind) -> Color {
         LintKind::Regionalism => Color::new(0xC0, 0x61, 0xCB),
         LintKind::Repetition => Color::new(0x00, 0xA6, 0x7C),
         LintKind::Spelling => Color::new(0xEE, 0x42, 0x66),
-        LintKind::Style => Color::new(0xFF, 0xD2, 0x3F),
+        // Broadside: style-guide lints use this kind. Upstream pale yellow vanishes on white.
+        LintKind::Style => Color::new(0xB8, 0x5C, 0x00),
         LintKind::Typo => Color::new(0xFF, 0x6B, 0x35),
         LintKind::Usage => Color::new(0x1E, 0x90, 0xFF),
         LintKind::WordChoice => Color::new(0x22, 0x8B, 0x22),
