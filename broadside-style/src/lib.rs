@@ -19,6 +19,7 @@
 mod conflicts;
 mod guide;
 mod linters;
+pub mod model;
 mod store;
 
 pub use conflicts::{Conflict, EffectiveRule, active_by_precedence, resolve};

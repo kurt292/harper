@@ -9,6 +9,7 @@ import GeneralPage from './pages/GeneralPage.svelte';
 import GettingStartedPage from './pages/GettingStartedPage.svelte';
 import IntegrationsPage from './pages/IntegrationsPage.svelte';
 import RulesPage from './pages/RulesPage.svelte';
+import StyleGuidesPage from './pages/StyleGuidesPage.svelte';
 import ShortcutsPage from './pages/ShortcutsPage.svelte';
 import WeirpacksPage from './pages/WeirpacksPage.svelte';
 import WritingPage from './pages/WritingPage.svelte';
@@ -27,6 +28,7 @@ const titleMap: Record<SectionId, string> = {
 	rules: 'Rules',
 	weirpacks: 'Weirpacks',
 	integrations: 'Integrations',
+	'style-guides': 'Style Guides',
 	about: 'About',
 };
 
@@ -78,6 +80,8 @@ $: if (contentEl && active) {
         <WeirpacksPage />
       {:else if active === "integrations"}
         <IntegrationsPage />
+      {:else if active === "style-guides"}
+        <StyleGuidesPage />
       {:else if active === "about"}
         <AboutPage />
       {/if}

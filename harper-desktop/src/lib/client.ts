@@ -273,3 +273,71 @@ function dialectToRustDialect(dialect: Dialect): RustDialect {
 			return 'American';
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Broadside style guides
+// ---------------------------------------------------------------------------
+
+export interface StyleGuideView {
+	id: string;
+	name: string;
+	active: boolean;
+	priority: number;
+	rule_count: number;
+	model_rule_count: number;
+	path: string;
+	json: string;
+}
+
+export interface StyleModelStatus {
+	endpoint: string;
+	model: string;
+	reachable: boolean;
+	model_available: boolean;
+	available_models: string[];
+	error: string | null;
+}
+
+export interface ModelViolation {
+	rule: string;
+	original: string;
+	suggestion?: string;
+	explanation: string;
+	confidence: number;
+	span: [number, number];
+}
+
+export interface StyleCheckReport {
+	model: string;
+	guides: string[];
+	violations: ModelViolation[];
+	elapsed_ms: number;
+	dropped: string[];
+}
+
+export class StyleGuides {
+	static async list(): Promise<StyleGuideView[]> {
+		return await invoke<StyleGuideView[]>('get_style_guides');
+	}
+
+	static async setActive(id: string, active: boolean): Promise<void> {
+		await invoke('set_style_guide_active', { id, active });
+	}
+
+	/** Saves a guide from JSON text and returns the normalized JSON that was written. */
+	static async save(json: string): Promise<string> {
+		return await invoke<string>('save_style_guide', { json });
+	}
+
+	static async delete(id: string): Promise<void> {
+		await invoke('delete_style_guide', { id });
+	}
+
+	static async modelStatus(): Promise<StyleModelStatus> {
+		return await invoke<StyleModelStatus>('get_style_model_status');
+	}
+
+	static async check(text: string): Promise<StyleCheckReport> {
+		return await invoke<StyleCheckReport>('style_check', { text });
+	}
+}

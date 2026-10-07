@@ -6,6 +6,7 @@ export type SectionId =
 	| 'rules'
 	| 'weirpacks'
 	| 'integrations'
+	| 'style-guides'
 	| 'about';
 
 export interface NavItem {
@@ -34,6 +35,11 @@ export const MAIN_NAV_ITEMS: NavItem[] = [
 		id: 'integrations',
 		label: 'Integrations',
 		gradient: 'linear-gradient(180deg, #6b6f78 0%, #3b3f48 100%)',
+	},
+	{
+		id: 'style-guides',
+		label: 'Style Guides',
+		gradient: 'linear-gradient(180deg, #f6b35b 0%, #d97a1a 100%)',
 	},
 ];
 

@@ -49,6 +49,12 @@ pub fn application_message_handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool {
         stop_highlighter_service,
         launch_app,
         search_apps,
+        get_style_guides,
+        set_style_guide_active,
+        save_style_guide,
+        delete_style_guide,
+        get_style_model_status,
+        style_check,
     ]
 }
 
@@ -442,4 +448,123 @@ fn search_apps(
         .lock()
         .map_err(|error| format!("Failed to read platform broker: {error}"))?
         .search_apps(&query)
+}
+
+// ---------------------------------------------------------------------------
+// Broadside style guides
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StyleGuideView {
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+    pub priority: u32,
+    pub rule_count: usize,
+    pub model_rule_count: usize,
+    pub path: String,
+    /// The guide as pretty JSON, for the editor.
+    pub json: String,
+}
+
+fn style_store() -> Result<broadside_style::GuideStore, String> {
+    crate::style_guides::store().ok_or_else(|| "config directory unavailable".to_string())
+}
+
+#[tauri::command]
+async fn get_style_guides() -> Result<Vec<StyleGuideView>, String> {
+    let store = style_store()?;
+    let loaded = store.load().map_err(|error| error.to_string())?;
+    let mut views = Vec::with_capacity(loaded.guides.len());
+    for guide in loaded.guides {
+        views.push(StyleGuideView {
+            path: store.path_for(&guide.id).to_string_lossy().into_owned(),
+            json: serde_json::to_string_pretty(&guide).map_err(|error| error.to_string())?,
+            rule_count: guide.rules.len(),
+            model_rule_count: guide.rules.iter().filter(|r| !r.is_deterministic()).count(),
+            id: guide.id,
+            name: guide.name,
+            active: guide.active,
+            priority: guide.priority,
+        });
+    }
+    Ok(views)
+}
+
+#[tauri::command]
+async fn set_style_guide_active(id: String, active: bool) -> Result<(), String> {
+    style_store()?
+        .set_active(&id, active)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Saves a guide from its JSON text. Returns the normalized JSON that was written.
+#[tauri::command]
+async fn save_style_guide(json: String) -> Result<String, String> {
+    let guide: broadside_style::StyleGuide =
+        serde_json::from_str(&json).map_err(|error| format!("invalid guide JSON: {error}"))?;
+    let store = style_store()?;
+    store.save(&guide).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&guide).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn delete_style_guide(id: String) -> Result<(), String> {
+    style_store()?.delete(&id).map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StyleModelStatus {
+    pub endpoint: String,
+    pub model: String,
+    pub reachable: bool,
+    pub model_available: bool,
+    pub available_models: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+async fn get_style_model_status() -> Result<StyleModelStatus, String> {
+    let config = broadside_style::model::ModelConfig::default();
+    let result = tauri::async_runtime::spawn_blocking({
+        let config = config.clone();
+        move || broadside_style::model::available_models(&config)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    Ok(match result {
+        Ok(models) => StyleModelStatus {
+            model_available: models.iter().any(|m| m == &config.model),
+            available_models: models,
+            reachable: true,
+            error: None,
+            endpoint: config.endpoint,
+            model: config.model,
+        },
+        Err(error) => StyleModelStatus {
+            reachable: false,
+            model_available: false,
+            available_models: Vec::new(),
+            error: Some(error.to_string()),
+            endpoint: config.endpoint,
+            model: config.model,
+        },
+    })
+}
+
+/// Lane B: run the active guides' model rules against `text`. Slow; the UI must show progress.
+#[tauri::command]
+async fn style_check(
+    text: String,
+) -> Result<broadside_style::model::StyleCheckReport, String> {
+    let guides = crate::style_guides::load_guides();
+    let config = broadside_style::model::ModelConfig::default();
+    tauri::async_runtime::spawn_blocking(move || {
+        broadside_style::model::check(&text, &guides, &config)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
