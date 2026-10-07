@@ -41,7 +41,11 @@ impl Window {
         context: egui::Context,
     ) -> Result<Self, Error> {
         let position = monitor.position();
-        let size = monitor.size();
+        // One pixel shorter than the monitor on purpose. A borderless always-on-top window that
+        // covers a monitor exactly is eligible for the compositor's direct-scanout path, which
+        // ignores transparency (an opaque block) and blanks the display on every transition.
+        let monitor_size = monitor.size();
+        let size = PhysicalSize::new(monitor_size.width, monitor_size.height.saturating_sub(1));
         let window = Arc::new(
             event_loop.create_window(
                 WinitWindow::default_attributes()
