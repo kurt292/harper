@@ -2,6 +2,7 @@
 import { Button, IconButton, Input, Panel, Select, Textarea, Toggle, TrashIcon } from 'components';
 import { onMount } from 'svelte';
 import {
+	DenyListClient,
 	type StyleCheckReport,
 	type StyleGuideView,
 	type StyleModelStatus,
@@ -167,6 +168,13 @@ let newRuleType: RuleType = 'forbid_term';
 let modelStatus: StyleModelStatus | null = null;
 let isModelStatusLoading = true;
 
+let denyApps = '';
+let denyUrls = '';
+let isDenyLoading = true;
+let isDenySaving = false;
+let denyError = '';
+let denyNotice = '';
+
 let checkText = '';
 let isChecking = false;
 let checkError = '';
@@ -176,6 +184,7 @@ let showDropped = false;
 onMount(() => {
 	void loadGuides();
 	void loadModelStatus();
+	void loadDenyList();
 
 	const refresh = () => {
 		if (!isGuidesSaving && editingId === null) {
@@ -195,6 +204,35 @@ async function loadGuides() {
 		guidesError = `Unable to load style guides: ${error}`;
 	} finally {
 		isGuidesLoading = false;
+	}
+}
+
+async function loadDenyList() {
+	isDenyLoading = true;
+	denyError = '';
+	try {
+		const list = await DenyListClient.get();
+		denyApps = list.apps.join('\n');
+		denyUrls = list.urls.join('\n');
+	} catch (error) {
+		denyError = `Unable to load the deny-list: ${error}`;
+	} finally {
+		isDenyLoading = false;
+	}
+}
+
+async function saveDenyList() {
+	isDenySaving = true;
+	denyError = '';
+	denyNotice = '';
+	try {
+		await DenyListClient.set(denyApps.split('\n'), denyUrls.split('\n'));
+		denyNotice = 'Saved. Takes effect on the next focus change.';
+		await loadDenyList();
+	} catch (error) {
+		denyError = `Unable to save the deny-list: ${error}`;
+	} finally {
+		isDenySaving = false;
 	}
 }
 
@@ -667,6 +705,44 @@ $: activeModelRuleCount = guides
   {/if}
 </div>
 
+<div class="divider"></div>
+
+<div class="stanza">
+  <div class="eyebrow">Never read</div>
+  <p class="section-copy">
+    Apps and sites Harper must never read, whatever the app list says. Password managers,
+    banks, payroll and sign-in pages are listed by default. One entry per line. Apps are
+    executable names or full paths; sites are matched as substrings of the browser address
+    (Chrome and Edge).
+  </p>
+
+  {#if denyError}
+    <p class="result-summary" role="alert">{denyError}</p>
+  {/if}
+  {#if isDenyLoading}
+    <p class="result-summary">Loading the deny-list...</p>
+  {/if}
+
+  <div class="field-grid">
+    <label class="field">
+      <span>Apps (one per line)</span>
+      <Textarea bind:value={denyApps} rows={8} spellcheck={false} className="deny-list" />
+    </label>
+    <label class="field">
+      <span>Sites (one per line, substring of the address)</span>
+      <Textarea bind:value={denyUrls} rows={8} spellcheck={false} className="deny-list" />
+    </label>
+  </div>
+
+  {#if denyNotice}
+    <p class="result-summary">{denyNotice}</p>
+  {/if}
+  <div class="actions-row">
+    <Button unstyled class="button" type="button" disabled={isDenySaving || isDenyLoading} on:click={saveDenyList}>Save</Button>
+    <span class="muted">Password fields are never read in any app, independent of this list.</span>
+  </div>
+</div>
+
 <style>
   .editor {
     margin-top: 1rem;
@@ -740,7 +816,8 @@ $: activeModelRuleCount = guides
 
   :global(.json-editor),
   :global(.check-input),
-  :global(.rule-textarea) {
+  :global(.rule-textarea),
+  :global(.deny-list) {
     width: 100%;
     font-size: 0.85rem;
     line-height: 1.4;

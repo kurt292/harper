@@ -37,6 +37,7 @@ mod commands;
 pub mod communication;
 pub mod config;
 mod debounce;
+pub mod deny_list;
 mod desktop_updater;
 pub mod highlighter;
 pub mod highlighter_service;

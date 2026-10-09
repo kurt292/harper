@@ -51,6 +51,7 @@ enum JobKind {
     Text,
     Rects,
     Selection,
+    Url,
     Apply,
 }
 
@@ -102,6 +103,8 @@ enum JobResult {
     GroupedRects(Vec<Vec<Rect>>),
     /// Selection as char offsets `[start, end)` within the field's text.
     Range(usize, usize),
+    /// The browser's current address, or `None` when the window has no address bar.
+    Url(Option<String>),
     Err,
 }
 
@@ -248,6 +251,29 @@ impl AutomationService {
     }
 
     /// The focused field's text, as of the latest finished read. Queues the next read.
+    /// The browser address shown in the focused window, as of the latest finished read. `None`
+    /// inside the `Ready` means the window has no address bar (not a supported browser).
+    pub fn get_url(&mut self) -> Read<Option<String>> {
+        let Some(window) = self.resolve_focused_window() else {
+            return Read::Unavailable;
+        };
+        self.collect_results();
+
+        let fingerprint = window as u64;
+        self.submit(
+            JobKind::Url,
+            fingerprint,
+            url_job,
+            vec![JobArgument::Window(window)],
+        );
+
+        match self.take_completed(JobKind::Url, fingerprint) {
+            Some(JobResult::Url(url)) => Read::Ready(url),
+            Some(_) => Read::Unavailable,
+            None => Read::Pending,
+        }
+    }
+
     /// The focused field's selection as char offsets, as of the latest finished read. Queues
     /// the next read. A caret with no selection reads as an empty range.
     pub fn get_selection(&mut self) -> Read<(usize, usize)> {
@@ -915,6 +941,62 @@ fn search_text_element(
         uiautomation::errors::ERR_NOTFOUND,
         "no text element with the linted text found",
     ))
+}
+
+thread_local! {
+    /// Address-bar element per browser window. Finding it is a subtree search; reading its
+    /// value afterwards is one property fetch.
+    static ADDRESS_BARS: std::cell::RefCell<std::collections::HashMap<isize, UIElement>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The address shown in a Chromium browser window (Chrome, Edge, Brave), or `None` for windows
+/// without a recognisable address bar.
+fn url_job(automation: &UIAutomation, args: Vec<JobArgument>) -> JobResult {
+    let Some(JobArgument::Window(window)) = args.first() else {
+        return JobResult::Err;
+    };
+
+    let cached = ADDRESS_BARS.with(|cell| cell.borrow().get(window).cloned());
+    let element = match cached {
+        Some(element) => element,
+        None => {
+            let Ok(root) = automation.element_from_handle(Handle::from(*window)) else {
+                return JobResult::Err;
+            };
+            let Ok(condition) = automation.create_property_condition(
+                UIProperty::Name,
+                Variant::from("Address and search bar"),
+                None,
+            ) else {
+                return JobResult::Err;
+            };
+            match root.find_first(TreeScope::Descendants, &condition) {
+                Ok(element) => {
+                    ADDRESS_BARS.with(|cell| {
+                        let mut bars = cell.borrow_mut();
+                        if bars.len() > 32 {
+                            bars.clear();
+                        }
+                        bars.insert(*window, element.clone());
+                    });
+                    element
+                }
+                Err(_) => return JobResult::Url(None),
+            }
+        }
+    };
+
+    match element
+        .get_pattern::<UIValuePattern>()
+        .and_then(|pattern| pattern.get_value())
+    {
+        Ok(url) => JobResult::Url(Some(url)),
+        Err(_) => {
+            ADDRESS_BARS.with(|cell| cell.borrow_mut().remove(window));
+            JobResult::Url(None)
+        }
+    }
 }
 
 /// Char offsets of the focused field's selection. Moving the returned range's start back to the

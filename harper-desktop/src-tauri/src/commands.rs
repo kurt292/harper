@@ -55,6 +55,8 @@ pub fn application_message_handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool {
         delete_style_guide,
         get_style_model_status,
         style_check,
+        get_deny_list,
+        set_deny_list,
     ]
 }
 
@@ -567,4 +569,30 @@ async fn style_check(text: String) -> Result<broadside_style::model::StyleCheckR
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Broadside deny-list
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn get_deny_list() -> Result<crate::deny_list::DenyList, String> {
+    Ok(crate::deny_list::DenyList::load())
+}
+
+#[tauri::command]
+async fn set_deny_list(apps: Vec<String>, urls: Vec<String>) -> Result<(), String> {
+    let list = crate::deny_list::DenyList {
+        apps: apps
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        urls: urls
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    };
+    list.save()
 }

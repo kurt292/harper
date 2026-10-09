@@ -77,6 +77,28 @@ impl WindowsBroker {
             return Some(false);
         }
 
+        // Broadside: the deny-list wins over the integration list.
+        let deny_list = crate::deny_list::DenyList::current();
+        if deny_list.denies_app(&path.to_string_lossy()) {
+            self.diagnose(format!("{exe}: on the deny-list, not linting"));
+            return Some(false);
+        }
+        if is_chromium_browser(&exe) {
+            let url = self.service.lock().ok()?.get_url();
+            match url {
+                Read::Ready(Some(url)) => {
+                    if deny_list.denies_url(&url) {
+                        self.diagnose(format!("{exe}: site on the deny-list, not linting"));
+                        return Some(false);
+                    }
+                }
+                Read::Ready(None) => {}
+                // Until the address is known, show nothing rather than something stale.
+                Read::Pending => return Some(false),
+                Read::Unavailable => {}
+            }
+        }
+
         match window_is_moving(HWND(focused_window as *mut c_void)) {
             Ok(is_moving) => Some(!is_moving),
             Err(error) => {
@@ -440,4 +462,17 @@ pub fn get_window_path(window_id: isize) -> WindowsResult<PathBuf> {
             &buffer[..length as usize],
         )))
     }
+}
+
+/// Browsers whose address bar the broker knows how to read (Chromium's accessible name).
+fn is_chromium_browser(exe: &str) -> bool {
+    [
+        "chrome.exe",
+        "msedge.exe",
+        "brave.exe",
+        "chromium.exe",
+        "vivaldi.exe",
+    ]
+    .iter()
+    .any(|known| known.eq_ignore_ascii_case(exe))
 }

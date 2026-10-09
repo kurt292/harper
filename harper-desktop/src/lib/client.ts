@@ -341,3 +341,22 @@ export class StyleGuides {
 		return await invoke<StyleCheckReport>('style_check', { text });
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Broadside deny-list
+// ---------------------------------------------------------------------------
+
+export interface DenyList {
+	apps: string[];
+	urls: string[];
+}
+
+export class DenyListClient {
+	static async get(): Promise<DenyList> {
+		return await invoke<DenyList>('get_deny_list');
+	}
+
+	static async set(apps: string[], urls: string[]): Promise<void> {
+		await invoke('set_deny_list', { apps, urls });
+	}
+}
