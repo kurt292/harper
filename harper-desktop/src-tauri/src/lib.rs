@@ -14,6 +14,7 @@ use harper_core::{
     spell::MutableDictionary,
 };
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io::stderr;
 use std::{
     cell::RefCell,
@@ -42,6 +43,7 @@ pub mod highlighter_service;
 pub mod lint_kind_color;
 mod os_broker;
 pub mod rect;
+pub mod style_check;
 pub mod style_guides;
 
 #[cfg(target_os = "macos")]
@@ -325,12 +327,22 @@ pub fn run_highlighter(has_parent: bool) {
     let refresh_debounce_ms = debounce_ms.clone();
     let refresh_linter = linter.clone();
 
+    // Broadside: findings from the on-demand model check, appended to every lint pass for the
+    // text they still apply to. Filled by the event loop when a check finishes.
+    let model_findings: style_check::SharedFindings = Rc::new(RefCell::new(None));
+    let lint_model_findings = model_findings.clone();
+    let lint_model_ignored = ignored_lints.clone();
+    let style_checker = style_check::StyleChecker::start();
+
     let lint_text = move |text: &str| {
         let debounce_ms = *lint_debounce_ms.borrow();
         let mut debounce_state = lint_debounce_state.borrow_mut();
 
         match debounce_state.status(text, debounce_ms) {
-            DebounceStatus::Cached(lints) => return lints,
+            DebounceStatus::Cached(mut lints) => {
+                append_model_lints(&mut lints, text, &lint_model_findings, &lint_model_ignored);
+                return lints;
+            }
             DebounceStatus::Ready => {}
         }
 
@@ -344,6 +356,12 @@ pub fn run_highlighter(has_parent: bool) {
         }
 
         debounce_state.store_lints(text, debounce_ms, &organized_lints);
+        append_model_lints(
+            &mut organized_lints,
+            text,
+            &lint_model_findings,
+            &lint_model_ignored,
+        );
 
         organized_lints
     };
@@ -439,6 +457,8 @@ pub fn run_highlighter(has_parent: bool) {
         add_to_dictionary,
         disable_rule,
         refresh_config,
+        style_checker,
+        model_findings,
     )
     .and_then(Highlighter::run_window_for_each_monitor)
     {
@@ -539,4 +559,27 @@ fn apply_highlighter_config(
     }
     *debounce_ms.borrow_mut() = config.debounce_ms;
     *linter.borrow_mut() = linter_config;
+}
+
+/// Adds the model style check's findings for `text` under their own rule name, minus any the
+/// user has ignored. Findings for a different text are located by their quoted passage; ones
+/// that no longer appear are left out.
+fn append_model_lints(
+    lints: &mut BTreeMap<String, Vec<Lint>>,
+    text: &str,
+    findings: &style_check::SharedFindings,
+    ignored: &Rc<RefCell<IgnoredLints>>,
+) {
+    let Some(findings) = findings.borrow().as_ref().map(|f| f.lints_for(text)) else {
+        return;
+    };
+    if findings.is_empty() {
+        return;
+    }
+    let mut model_lints = findings;
+    let document = Document::new_markdown_default_curated(text);
+    ignored.borrow().remove_ignored(&mut model_lints, &document);
+    if !model_lints.is_empty() {
+        lints.insert(style_check::MODEL_RULE_NAME.to_string(), model_lints);
+    }
 }

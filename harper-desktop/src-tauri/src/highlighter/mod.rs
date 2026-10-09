@@ -12,6 +12,7 @@ use harper_core::{Document, linting::Lint};
 
 use crate::os_broker::{LintText, OsBroker};
 use crate::rect::ActionableLint;
+use crate::style_check::{SharedFindings, StyleChecker};
 
 type IgnoreLint = Box<dyn FnMut(&Lint, &Document)>;
 type AddToDictionary = Box<dyn FnMut(&str)>;
@@ -36,6 +37,8 @@ impl Highlighter {
         add_to_dictionary: impl FnMut(&str) + 'static,
         disable_rule: impl FnMut(&str) + 'static,
         refresh_config: impl FnMut() + 'static,
+        style_checker: StyleChecker,
+        model_findings: SharedFindings,
     ) -> Result<Self, Error> {
         let context = egui::Context::default();
         let lint_text: LintText = Box::new(lint_text);
@@ -54,6 +57,8 @@ impl Highlighter {
                     add_to_dictionary,
                     disable_rule,
                     refresh_config,
+                    style_checker,
+                    model_findings,
                 },
             )?,
             context,

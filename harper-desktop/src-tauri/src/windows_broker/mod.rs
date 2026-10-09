@@ -34,6 +34,8 @@ pub struct WindowsBroker {
     is_integration_enabled: Box<dyn FnMut(&str) -> bool + Send>,
     /// Last diagnostic state, so the log only changes when the situation does.
     last_diagnostic: Option<String>,
+    /// Text of the last successful read, for the model style check.
+    last_text: Option<String>,
 }
 
 impl WindowsBroker {
@@ -44,6 +46,7 @@ impl WindowsBroker {
             service: Arc::new(Mutex::new(AutomationService::create_and_start())),
             is_integration_enabled: Box::new(is_integration_enabled),
             last_diagnostic: None,
+            last_text: None,
         }
     }
 
@@ -124,6 +127,7 @@ impl OsBroker for WindowsBroker {
             return Some(Vec::new());
         }
 
+        self.last_text = Some(text.clone());
         let lints = lint_text(&text);
         let lint_count: usize = lints.values().map(Vec::len).sum();
         let rects_read = self
@@ -194,6 +198,10 @@ impl OsBroker for WindowsBroker {
                 })
                 .collect(),
         )
+    }
+
+    fn last_read_text(&self) -> Option<String> {
+        self.last_text.clone()
     }
 
     fn cursor_position(&self) -> Option<Pos2> {

@@ -72,6 +72,9 @@ pub struct RenderState {
 
     /// Called when the user disables the rule that produced the selected lint.
     disable_rule: DisableRule,
+
+    /// A short status line (model style check progress), with when it was set and for how long.
+    status: Option<(String, std::time::Instant, std::time::Duration)>,
 }
 
 impl RenderState {
@@ -90,6 +93,7 @@ impl RenderState {
             ignore_lint,
             add_to_dictionary,
             disable_rule,
+            status: None,
         };
         state.set_lints(rects);
         state
@@ -114,6 +118,31 @@ impl RenderState {
     /// How many highlights the next frame will draw. For diagnostics.
     pub fn lint_count(&self) -> usize {
         self.lints().len()
+    }
+
+    /// Shows `message` at the top of every overlay for `for_duration`.
+    pub fn set_status(&mut self, message: impl Into<String>, for_duration: std::time::Duration) {
+        self.status = Some((message.into(), std::time::Instant::now(), for_duration));
+    }
+
+    fn draw_status(&self, ui: &mut egui::Ui) {
+        let Some((message, since, for_duration)) = &self.status else {
+            return;
+        };
+        if since.elapsed() > *for_duration {
+            return;
+        }
+        let painter = ui.painter();
+        let font = egui::FontId::proportional(15.0);
+        let galley = painter.layout_no_wrap(message.clone(), font, egui::Color32::WHITE);
+        let origin = egui::pos2(24.0, 24.0);
+        let rect = egui::Rect::from_min_size(origin, galley.size()).expand(8.0);
+        painter.rect_filled(
+            rect,
+            6.0,
+            egui::Color32::from_rgba_unmultiplied(20, 20, 20, 230),
+        );
+        painter.galley(origin, galley, egui::Color32::WHITE);
     }
 
     /// Updates which lint owns the suggestion popup without exposing render-state internals.
@@ -159,6 +188,7 @@ impl RenderState {
     /// being painted, in the same coordinate space, so a window that does not start at 0,0 (a
     /// second monitor) draws its highlights where they belong. Hit-testing stays in screen space.
     pub fn render(&mut self, ui: &mut egui::Ui, origin: (f64, f64)) {
+        self.draw_status(ui);
         let local = |rect: &Rect| {
             Rect::new(
                 rect.x - origin.0,

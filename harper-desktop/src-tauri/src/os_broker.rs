@@ -42,6 +42,12 @@ pub trait OsBroker {
     /// Grab the position of the user's cursor on the screen.
     fn cursor_position(&self) -> Option<egui::Pos2>;
 
+    /// The focused field's text as of the last successful `get_boxes` read, for features that
+    /// act on the whole field (Broadside's model style check). `None` where not tracked.
+    fn last_read_text(&self) -> Option<String> {
+        None
+    }
+
     /// Check whether Harper has permission to access the OS' native accessibility API.
     fn accessibility_permission_status(&self) -> AccessibilityPermissionStatus;
 

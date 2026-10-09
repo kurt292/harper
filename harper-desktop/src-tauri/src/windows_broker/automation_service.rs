@@ -2,8 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::iter::once;
 use std::sync::mpsc::{
-    Receiver, Sender, SyncSender, TryRecvError, TrySendError, channel,
-    sync_channel,
+    Receiver, Sender, SyncSender, TryRecvError, TrySendError, channel, sync_channel,
 };
 use std::thread::sleep;
 use std::time::{Duration, Instant};

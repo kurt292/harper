@@ -16,6 +16,7 @@ use super::render_state::{HitTarget, RenderState};
 use super::window::Window;
 use crate::os_broker::{LintText, OsBroker};
 use crate::rect::ActionableLint;
+use crate::style_check::{SharedFindings, StyleCheckEvent, StyleChecker};
 
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -41,6 +42,8 @@ pub struct WindowManager {
     add_to_dictionary: AddToDictionary,
     disable_rule: DisableRule,
     refresh_config: RefreshConfig,
+    style_checker: StyleChecker,
+    model_findings: SharedFindings,
 }
 
 pub struct WindowManagerCallbacks {
@@ -49,6 +52,8 @@ pub struct WindowManagerCallbacks {
     pub add_to_dictionary: AddToDictionary,
     pub disable_rule: DisableRule,
     pub refresh_config: RefreshConfig,
+    pub style_checker: StyleChecker,
+    pub model_findings: SharedFindings,
 }
 
 impl WindowManager {
@@ -76,6 +81,8 @@ impl WindowManager {
             add_to_dictionary: callbacks.add_to_dictionary,
             disable_rule: callbacks.disable_rule,
             refresh_config: callbacks.refresh_config,
+            style_checker: callbacks.style_checker,
+            model_findings: callbacks.model_findings,
         })
     }
 
@@ -97,6 +104,8 @@ impl WindowManager {
                 add_to_dictionary: self.add_to_dictionary,
                 disable_rule: self.disable_rule,
                 refresh_config: self.refresh_config,
+                style_checker: self.style_checker,
+                model_findings: self.model_findings,
             },
         );
 
@@ -123,6 +132,8 @@ struct WindowManagerApp {
     hovered_lint: Option<usize>,
     cursor_hittest_enabled: bool,
     error: Option<Error>,
+    style_checker: StyleChecker,
+    model_findings: SharedFindings,
 }
 
 impl WindowManagerApp {
@@ -150,6 +161,55 @@ impl WindowManagerApp {
             hovered_lint: None,
             cursor_hittest_enabled: false,
             error: None,
+            style_checker: callbacks.style_checker,
+            model_findings: callbacks.model_findings,
+        }
+    }
+
+    /// Broadside: starts a model style check on the hotkey and publishes its findings.
+    fn poll_style_check(&mut self) {
+        if self.style_checker.hotkey_pressed() {
+            if self.style_checker.is_running() {
+                self.render_state
+                    .set_status("Style check already running", Duration::from_secs(3));
+            } else {
+                match self.os_broker.last_read_text() {
+                    Some(text) if !text.trim().is_empty() => {
+                        self.render_state.set_status(
+                            format!(
+                                "Checking {} characters with the local model (Ctrl+Alt+H)",
+                                text.chars().count()
+                            ),
+                            Duration::from_secs(120),
+                        );
+                        self.style_checker.run(text);
+                    }
+                    _ => self.render_state.set_status(
+                        "Style check: no text field in focus",
+                        Duration::from_secs(4),
+                    ),
+                }
+            }
+            for window in &self.windows {
+                window.request_redraw();
+            }
+        }
+
+        if let Some(event) = self.style_checker.poll() {
+            match event {
+                StyleCheckEvent::Finished { findings, summary } => {
+                    *self.model_findings.borrow_mut() = Some(findings);
+                    self.render_state
+                        .set_status(summary, Duration::from_secs(6));
+                }
+                StyleCheckEvent::Failed(message) => {
+                    self.render_state
+                        .set_status(message, Duration::from_secs(8));
+                }
+            }
+            for window in &self.windows {
+                window.request_redraw();
+            }
         }
     }
 
@@ -224,6 +284,7 @@ impl ApplicationHandler for WindowManagerApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
 
+        self.poll_style_check();
         self.read_rect_updates();
 
         // Belt and braces for the WM_PAINT starvation described in `window_event`: paint any
