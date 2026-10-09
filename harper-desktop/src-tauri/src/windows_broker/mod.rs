@@ -36,6 +36,8 @@ pub struct WindowsBroker {
     last_diagnostic: Option<String>,
     /// Text of the last successful read, for the model style check.
     last_text: Option<String>,
+    /// Executable path of the app owning the focused window, as of the last poll.
+    last_app: Option<String>,
 }
 
 impl WindowsBroker {
@@ -47,6 +49,7 @@ impl WindowsBroker {
             is_integration_enabled: Box::new(is_integration_enabled),
             last_diagnostic: None,
             last_text: None,
+            last_app: None,
         }
     }
 
@@ -68,6 +71,7 @@ impl WindowsBroker {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
+        self.last_app = Some(path.to_string_lossy().into_owned());
         if !(self.is_integration_enabled)(&path.to_string_lossy()) {
             self.diagnose(format!("{exe}: integration disabled, not linting"));
             return Some(false);
@@ -202,6 +206,10 @@ impl OsBroker for WindowsBroker {
 
     fn last_read_text(&self) -> Option<String> {
         self.last_text.clone()
+    }
+
+    fn focused_app_id(&self) -> Option<String> {
+        self.last_app.clone()
     }
 
     fn cursor_position(&self) -> Option<Pos2> {

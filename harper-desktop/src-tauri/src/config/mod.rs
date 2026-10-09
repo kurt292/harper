@@ -166,9 +166,14 @@ impl Config {
     }
 
     pub fn create_linter(&self) -> LintGroup {
+        self.create_linter_for_app(None)
+    }
+
+    /// Like [`Self::create_linter`], with style guides bound to `app` switched on as well.
+    pub fn create_linter_for_app(&self, app: Option<&str>) -> LintGroup {
         let mut group = LintGroup::new_curated(self.create_dictionary(), self.dialect)
             .with_lint_config(self.lint_config.clone());
-        crate::style_guides::install_into(&mut group);
+        crate::style_guides::install_into_for_app(&mut group, app);
         group
     }
 

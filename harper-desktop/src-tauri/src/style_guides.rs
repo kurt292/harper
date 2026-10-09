@@ -41,11 +41,40 @@ pub fn load_guides() -> Vec<StyleGuide> {
 }
 
 /// Adds the active guides' deterministic rules to `group`, logging conflicts when they change.
-/// Linters are rebuilt every second, so logging on every build would repeat forever.
 pub fn install_into(group: &mut LintGroup) {
-    static LAST_CONFLICTS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    install_into_for_app(group, None);
+}
 
-    let guides = load_guides();
+/// Like [`install_into`], but guides whose `bindings.apps` match `app` count as active too,
+/// so a guide bound to `outlook.exe` switches on by itself inside Outlook. Linters are rebuilt
+/// every second, so both the conflict log and the auto-activation log speak only on change.
+pub fn install_into_for_app(group: &mut LintGroup, app: Option<&str>) {
+    static LAST_CONFLICTS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    static LAST_AUTO: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    let mut guides = load_guides();
+    let mut auto_activated = Vec::new();
+    if let Some(app) = app {
+        for guide in &mut guides {
+            if !guide.active && guide.bindings.matches_app(app) {
+                guide.active = true;
+                auto_activated.push(guide.name.clone());
+            }
+        }
+    }
+    let auto_summary = match (app, auto_activated.is_empty()) {
+        (Some(app), false) => format!("{}: {}", app, auto_activated.join(", ")),
+        _ => String::new(),
+    };
+    if let Ok(mut last) = LAST_AUTO.lock()
+        && last.as_deref() != Some(auto_summary.as_str())
+    {
+        if !auto_summary.is_empty() {
+            info!("Style guides auto-activated for {auto_summary}");
+        }
+        *last = Some(auto_summary);
+    }
+
     let conflicts = broadside_style::install(group, &guides);
     let summary = conflicts
         .iter()

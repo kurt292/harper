@@ -108,6 +108,21 @@ impl Bindings {
     pub fn is_empty(&self) -> bool {
         self.apps.is_empty() && self.urls.is_empty()
     }
+
+    /// Whether `app_id` (an executable path or name) matches one of the bound apps.
+    ///
+    /// A bound entry that is a bare file name matches any path with that file name,
+    /// case-insensitively; a full path must match exactly, case-insensitively.
+    pub fn matches_app(&self, app_id: &str) -> bool {
+        let file_name = app_id.rsplit(['\\', '/']).next().unwrap_or(app_id);
+        self.apps.iter().any(|bound| {
+            if bound.contains(['\\', '/']) {
+                bound.eq_ignore_ascii_case(app_id)
+            } else {
+                bound.eq_ignore_ascii_case(file_name)
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +243,19 @@ mod tests {
         let again: StyleGuide =
             serde_json::from_str(&serde_json::to_string(&guide).unwrap()).unwrap();
         assert_eq!(guide, again);
+    }
+
+    #[test]
+    fn bindings_match_by_file_name_or_full_path() {
+        let bindings = Bindings {
+            apps: vec!["outlook.exe".into(), r"C:\Tools\Editor\editor.exe".into()],
+            urls: Vec::new(),
+        };
+        assert!(bindings.matches_app(r"C:\Program Files\Microsoft Office\root\Office16\OUTLOOK.EXE"));
+        assert!(bindings.matches_app("outlook.exe"));
+        assert!(bindings.matches_app(r"c:\tools\editor\EDITOR.EXE"));
+        assert!(!bindings.matches_app(r"C:\Other\editor.exe"));
+        assert!(!bindings.matches_app("notepad.exe"));
     }
 
     #[test]

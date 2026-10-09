@@ -333,8 +333,27 @@ pub fn run_highlighter(has_parent: bool) {
     let lint_model_findings = model_findings.clone();
     let lint_model_ignored = ignored_lints.clone();
     let style_checker = style_check::StyleChecker::start();
+    // Broadside: the focused app, kept current by the event loop. Guides bound to it switch on.
+    let current_app: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let lint_current_app = current_app.clone();
+    let refresh_current_app = current_app.clone();
+    let lint_dialect = dialect.clone();
+    let mut lint_app_cache: Option<String> = None;
 
     let lint_text = move |text: &str| {
+        // Rebuild the linter when the focused app changes so app-bound guides follow focus.
+        let app = lint_current_app.borrow().clone();
+        if app != lint_app_cache {
+            let dictionary =
+                Config::dictionary_from_user_dictionary(lint_user_dictionary.borrow().clone());
+            let flat_config = lint_linter.borrow().config.clone();
+            let mut group = LintGroup::new_curated(dictionary, *lint_dialect.borrow())
+                .with_lint_config(flat_config);
+            style_guides::install_into_for_app(&mut group, app.as_deref());
+            *lint_linter.borrow_mut() = group;
+            lint_app_cache = app;
+        }
+
         let debounce_ms = *lint_debounce_ms.borrow();
         let mut debounce_state = lint_debounce_state.borrow_mut();
 
@@ -442,6 +461,7 @@ pub fn run_highlighter(has_parent: bool) {
                 &refresh_integrations,
                 &refresh_debounce_ms,
                 &refresh_linter,
+                refresh_current_app.borrow().as_deref(),
             ),
             Err(error) => {
                 eprintln!("failed to refresh highlighter config: {error}");
@@ -459,6 +479,7 @@ pub fn run_highlighter(has_parent: bool) {
         refresh_config,
         style_checker,
         model_findings,
+        current_app,
     )
     .and_then(Highlighter::run_window_for_each_monitor)
     {
@@ -543,8 +564,9 @@ fn apply_highlighter_config(
     integrations: &Arc<StdMutex<IntegrationState>>,
     debounce_ms: &Rc<RefCell<u64>>,
     linter: &Rc<RefCell<LintGroup>>,
+    current_app: Option<&str>,
 ) {
-    let linter_config = config.create_linter();
+    let linter_config = config.create_linter_for_app(current_app);
     *ignored_lints.borrow_mut() = config.ignored_lints;
     *user_dictionary.borrow_mut() = config.mutable_dictionary;
     *dialect.borrow_mut() = config.dialect;

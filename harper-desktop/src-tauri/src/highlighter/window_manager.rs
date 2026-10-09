@@ -44,7 +44,11 @@ pub struct WindowManager {
     refresh_config: RefreshConfig,
     style_checker: StyleChecker,
     model_findings: SharedFindings,
+    current_app: CurrentApp,
 }
+
+/// The focused app's identifier, shared with the lint closure so app-bound guides follow focus.
+pub type CurrentApp = std::rc::Rc<std::cell::RefCell<Option<String>>>;
 
 pub struct WindowManagerCallbacks {
     pub lint_text: LintText,
@@ -54,6 +58,7 @@ pub struct WindowManagerCallbacks {
     pub refresh_config: RefreshConfig,
     pub style_checker: StyleChecker,
     pub model_findings: SharedFindings,
+    pub current_app: CurrentApp,
 }
 
 impl WindowManager {
@@ -83,6 +88,7 @@ impl WindowManager {
             refresh_config: callbacks.refresh_config,
             style_checker: callbacks.style_checker,
             model_findings: callbacks.model_findings,
+            current_app: callbacks.current_app,
         })
     }
 
@@ -106,6 +112,7 @@ impl WindowManager {
                 refresh_config: self.refresh_config,
                 style_checker: self.style_checker,
                 model_findings: self.model_findings,
+                current_app: self.current_app,
             },
         );
 
@@ -134,6 +141,7 @@ struct WindowManagerApp {
     error: Option<Error>,
     style_checker: StyleChecker,
     model_findings: SharedFindings,
+    current_app: CurrentApp,
 }
 
 impl WindowManagerApp {
@@ -163,6 +171,7 @@ impl WindowManagerApp {
             error: None,
             style_checker: callbacks.style_checker,
             model_findings: callbacks.model_findings,
+            current_app: callbacks.current_app,
         }
     }
 
@@ -285,6 +294,10 @@ impl ApplicationHandler for WindowManagerApp {
         let now = Instant::now();
 
         self.poll_style_check();
+        let app = self.os_broker.focused_app_id();
+        if *self.current_app.borrow() != app {
+            *self.current_app.borrow_mut() = app;
+        }
         self.read_rect_updates();
 
         // Belt and braces for the WM_PAINT starvation described in `window_event`: paint any

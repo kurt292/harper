@@ -39,6 +39,7 @@ impl Highlighter {
         refresh_config: impl FnMut() + 'static,
         style_checker: StyleChecker,
         model_findings: SharedFindings,
+        current_app: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     ) -> Result<Self, Error> {
         let context = egui::Context::default();
         let lint_text: LintText = Box::new(lint_text);
@@ -59,6 +60,7 @@ impl Highlighter {
                     refresh_config,
                     style_checker,
                     model_findings,
+                    current_app,
                 },
             )?,
             context,

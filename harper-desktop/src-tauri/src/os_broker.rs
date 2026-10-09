@@ -48,6 +48,12 @@ pub trait OsBroker {
         None
     }
 
+    /// Identifier of the application that owns the focused window, in the same form the
+    /// integration list uses (executable path on Windows). `None` where not tracked.
+    fn focused_app_id(&self) -> Option<String> {
+        None
+    }
+
     /// Check whether Harper has permission to access the OS' native accessibility API.
     fn accessibility_permission_status(&self) -> AccessibilityPermissionStatus;
 
