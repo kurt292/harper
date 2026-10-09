@@ -50,6 +50,7 @@ struct WorkerData {
 enum JobKind {
     Text,
     Rects,
+    Selection,
     Apply,
 }
 
@@ -99,6 +100,8 @@ enum JobResult {
     None,
     String(String),
     GroupedRects(Vec<Vec<Rect>>),
+    /// Selection as char offsets `[start, end)` within the field's text.
+    Range(usize, usize),
     Err,
 }
 
@@ -245,6 +248,29 @@ impl AutomationService {
     }
 
     /// The focused field's text, as of the latest finished read. Queues the next read.
+    /// The focused field's selection as char offsets, as of the latest finished read. Queues
+    /// the next read. A caret with no selection reads as an empty range.
+    pub fn get_selection(&mut self) -> Read<(usize, usize)> {
+        let Some(window) = self.resolve_focused_window() else {
+            return Read::Unavailable;
+        };
+        self.collect_results();
+
+        let fingerprint = window as u64;
+        self.submit(
+            JobKind::Selection,
+            fingerprint,
+            selection_job,
+            vec![JobArgument::Window(window)],
+        );
+
+        match self.take_completed(JobKind::Selection, fingerprint) {
+            Some(JobResult::Range(start, end)) => Read::Ready((start, end)),
+            Some(_) => Read::Unavailable,
+            None => Read::Pending,
+        }
+    }
+
     pub fn get_text(&mut self) -> Read<String> {
         let Some(window) = self.resolve_focused_window() else {
             return Read::Unavailable;
@@ -889,6 +915,39 @@ fn search_text_element(
         uiautomation::errors::ERR_NOTFOUND,
         "no text element with the linted text found",
     ))
+}
+
+/// Char offsets of the focused field's selection. Moving the returned range's start back to the
+/// document start counts the offset; the text left in the range then ends at the selection end.
+fn selection_job(automation: &UIAutomation, args: Vec<JobArgument>) -> JobResult {
+    let Some(JobArgument::Window(window)) = args.first() else {
+        return JobResult::Err;
+    };
+    let Ok(element) = text_element_for_window(automation, *window, None) else {
+        return JobResult::Err;
+    };
+    let Ok(pattern) = element.get_pattern::<UITextPattern>() else {
+        return JobResult::Err;
+    };
+    let Ok(ranges) = pattern.get_selection() else {
+        return JobResult::Err;
+    };
+    let Some(range) = ranges.into_iter().next() else {
+        return JobResult::Err;
+    };
+    let Ok(moved) = range.move_endpoint_by_unit(
+        TextPatternRangeEndpoint::Start,
+        TextUnit::Character,
+        -1_000_000,
+    ) else {
+        return JobResult::Err;
+    };
+    let start = usize::try_from(-moved).unwrap_or(0);
+    let Ok(text_to_end) = range.get_text(-1) else {
+        return JobResult::Err;
+    };
+    let end = text_to_end.chars().count().max(start);
+    JobResult::Range(start, end)
 }
 
 fn get_text_job(automation: &UIAutomation, args: Vec<JobArgument>) -> JobResult {

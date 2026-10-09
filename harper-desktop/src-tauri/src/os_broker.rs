@@ -54,6 +54,11 @@ pub trait OsBroker {
         None
     }
 
+    /// The focused field's selection as char offsets into the text `get_boxes` last read.
+    /// Non-blocking: call again on later ticks while it reports `Pending`.
+    fn read_selection(&mut self) -> SelectionRead {
+        SelectionRead::Unavailable
+    }
     /// Check whether Harper has permission to access the OS' native accessibility API.
     fn accessibility_permission_status(&self) -> AccessibilityPermissionStatus;
 
@@ -134,4 +139,12 @@ impl OsBroker for NoopBroker {
     fn search_apps(&self, _query: &str) -> Result<Vec<AppSearchResult>, String> {
         Ok(Vec::new())
     }
+}
+
+/// Outcome of a non-blocking selection read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionRead {
+    Pending,
+    Unavailable,
+    Ready(usize, usize),
 }

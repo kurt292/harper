@@ -21,6 +21,7 @@ mod guide;
 mod linters;
 pub mod model;
 mod store;
+pub mod thesaurus;
 
 pub use conflicts::{Conflict, EffectiveRule, active_by_precedence, resolve};
 pub use guide::{Bindings, Rule, StyleGuide};

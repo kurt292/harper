@@ -329,7 +329,8 @@ pub fn run_highlighter(has_parent: bool) {
 
     // Broadside: findings from the on-demand model check, appended to every lint pass for the
     // text they still apply to. Filled by the event loop when a check finishes.
-    let model_findings: style_check::SharedFindings = Rc::new(RefCell::new(None));
+    let model_findings: style_check::SharedFindings =
+        Rc::new(RefCell::new(style_check::FindingSets::default()));
     let lint_model_findings = model_findings.clone();
     let lint_model_ignored = ignored_lints.clone();
     let style_checker = style_check::StyleChecker::start();
@@ -359,7 +360,7 @@ pub fn run_highlighter(has_parent: bool) {
 
         match debounce_state.status(text, debounce_ms) {
             DebounceStatus::Cached(mut lints) => {
-                append_model_lints(&mut lints, text, &lint_model_findings, &lint_model_ignored);
+                append_findings(&mut lints, text, &lint_model_findings, &lint_model_ignored);
                 return lints;
             }
             DebounceStatus::Ready => {}
@@ -375,7 +376,7 @@ pub fn run_highlighter(has_parent: bool) {
         }
 
         debounce_state.store_lints(text, debounce_ms, &organized_lints);
-        append_model_lints(
+        append_findings(
             &mut organized_lints,
             text,
             &lint_model_findings,
@@ -583,25 +584,26 @@ fn apply_highlighter_config(
     *linter.borrow_mut() = linter_config;
 }
 
-/// Adds the model style check's findings for `text` under their own rule name, minus any the
-/// user has ignored. Findings for a different text are located by their quoted passage; ones
-/// that no longer appear are left out.
-fn append_model_lints(
+/// Adds the model check's and the thesaurus's findings for `text` under their own rule names,
+/// minus any the user has ignored. Findings are re-anchored to `text`; ones that no longer
+/// apply are left out.
+fn append_findings(
     lints: &mut BTreeMap<String, Vec<Lint>>,
     text: &str,
     findings: &style_check::SharedFindings,
     ignored: &Rc<RefCell<IgnoredLints>>,
 ) {
-    let Some(findings) = findings.borrow().as_ref().map(|f| f.lints_for(text)) else {
-        return;
-    };
-    if findings.is_empty() {
-        return;
-    }
-    let mut model_lints = findings;
-    let document = Document::new_markdown_default_curated(text);
-    ignored.borrow().remove_ignored(&mut model_lints, &document);
-    if !model_lints.is_empty() {
-        lints.insert(style_check::MODEL_RULE_NAME.to_string(), model_lints);
+    let sets = findings.borrow();
+    let mut document = None;
+    for (rule_name, set) in sets.iter() {
+        let mut found = set.lints_for(text);
+        if found.is_empty() {
+            continue;
+        }
+        let document = document.get_or_insert_with(|| Document::new_markdown_default_curated(text));
+        ignored.borrow().remove_ignored(&mut found, document);
+        if !found.is_empty() {
+            lints.insert(rule_name.to_string(), found);
+        }
     }
 }

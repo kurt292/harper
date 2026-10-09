@@ -14,9 +14,10 @@ use super::IgnoreLint;
 use super::RefreshConfig;
 use super::render_state::{HitTarget, RenderState};
 use super::window::Window;
+use crate::os_broker::SelectionRead;
 use crate::os_broker::{LintText, OsBroker};
 use crate::rect::ActionableLint;
-use crate::style_check::{SharedFindings, StyleCheckEvent, StyleChecker};
+use crate::style_check::{Findings, Hotkey, SharedFindings, StyleCheckEvent, StyleChecker};
 
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -142,6 +143,8 @@ struct WindowManagerApp {
     style_checker: StyleChecker,
     model_findings: SharedFindings,
     current_app: CurrentApp,
+    /// When the thesaurus hotkey was pressed and the selection read is still outstanding.
+    thesaurus_pending: Option<Instant>,
 }
 
 impl WindowManagerApp {
@@ -172,12 +175,49 @@ impl WindowManagerApp {
             style_checker: callbacks.style_checker,
             model_findings: callbacks.model_findings,
             current_app: callbacks.current_app,
+            thesaurus_pending: None,
         }
     }
 
     /// Broadside: starts a model style check on the hotkey and publishes its findings.
     fn poll_style_check(&mut self) {
-        if self.style_checker.hotkey_pressed() {
+        let hotkeys = self.style_checker.hotkeys_pressed();
+        if hotkeys.contains(&Hotkey::Thesaurus) {
+            self.thesaurus_pending = Some(Instant::now());
+            self.render_state.set_status(
+                "Looking up alternatives (Ctrl+Alt+T)",
+                Duration::from_secs(5),
+            );
+            for window in &self.windows {
+                window.request_redraw();
+            }
+        }
+        if let Some(since) = self.thesaurus_pending {
+            match self.os_broker.read_selection() {
+                SelectionRead::Ready(start, end) => {
+                    self.thesaurus_pending = None;
+                    self.lookup_thesaurus((start, end));
+                }
+                SelectionRead::Unavailable => {
+                    self.thesaurus_pending = None;
+                    self.render_state
+                        .set_status("Thesaurus: no text field in focus", Duration::from_secs(4));
+                }
+                SelectionRead::Pending if since.elapsed() > Duration::from_secs(3) => {
+                    self.thesaurus_pending = None;
+                    self.render_state.set_status(
+                        "Thesaurus: the field did not answer",
+                        Duration::from_secs(4),
+                    );
+                }
+                SelectionRead::Pending => {}
+            }
+            for window in &self.windows {
+                window.request_redraw();
+            }
+        }
+
+        if hotkeys.contains(&Hotkey::StyleCheck) {
             if self.style_checker.is_running() {
                 self.render_state
                     .set_status("Style check already running", Duration::from_secs(3));
@@ -207,7 +247,7 @@ impl WindowManagerApp {
         if let Some(event) = self.style_checker.poll() {
             match event {
                 StyleCheckEvent::Finished { findings, summary } => {
-                    *self.model_findings.borrow_mut() = Some(findings);
+                    self.model_findings.borrow_mut().model = Some(findings);
                     self.render_state
                         .set_status(summary, Duration::from_secs(6));
                 }
@@ -220,6 +260,33 @@ impl WindowManagerApp {
                 window.request_redraw();
             }
         }
+    }
+
+    /// Broadside: five alternatives for the selected word, shown through the usual card.
+    fn lookup_thesaurus(&mut self, selection: (usize, usize)) {
+        let Some(text) = self.os_broker.last_read_text() else {
+            self.render_state
+                .set_status("Thesaurus: no text field in focus", Duration::from_secs(4));
+            return;
+        };
+        let Some((word, span)) = broadside_style::thesaurus::word_at(&text, selection) else {
+            self.render_state
+                .set_status("Thesaurus: put the caret on a word", Duration::from_secs(4));
+            return;
+        };
+        let guides = crate::style_guides::load_guides();
+        let lookup = broadside_style::thesaurus::alternatives(&text, span, &guides, 5);
+        let summary = if lookup.options.is_empty() {
+            format!("Thesaurus: nothing for “{word}”")
+        } else {
+            format!(
+                "Thesaurus: {} options for “{word}”; hover the word",
+                lookup.options.len()
+            )
+        };
+        self.model_findings.borrow_mut().thesaurus = Some(Findings::from_lookup(text, &lookup));
+        self.render_state
+            .set_status(summary, Duration::from_secs(6));
     }
 
     /// Refreshes lint geometry from the OS broker inside the event loop so repaint requests happen on

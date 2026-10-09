@@ -1,6 +1,6 @@
 use crate::windows_broker::automation_service::{AutomationService, Read};
 use crate::{
-    os_broker::{AccessibilityPermissionStatus, AppSearchResult, OsBroker},
+    os_broker::{AccessibilityPermissionStatus, AppSearchResult, OsBroker, SelectionRead},
     rect::ActionableLint,
 };
 use cached::cached;
@@ -210,6 +210,17 @@ impl OsBroker for WindowsBroker {
 
     fn focused_app_id(&self) -> Option<String> {
         self.last_app.clone()
+    }
+
+    fn read_selection(&mut self) -> SelectionRead {
+        let Ok(mut service) = self.service.lock() else {
+            return SelectionRead::Unavailable;
+        };
+        match service.get_selection() {
+            Read::Ready((start, end)) => SelectionRead::Ready(start, end),
+            Read::Pending => SelectionRead::Pending,
+            Read::Unavailable => SelectionRead::Unavailable,
+        }
     }
 
     fn cursor_position(&self) -> Option<Pos2> {
